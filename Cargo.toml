@@ -1,0 +1,77 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/gry-core",
+  "crates/gry-store",
+  "crates/gry-parse",
+  "crates/gry-index",
+  "crates/gry-query",
+  "crates/gry-mcp",
+  "crates/gry-cli",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+version = "1.0.0"
+license = "MIT"
+authors = ["The gry authors"]
+
+[workspace.dependencies]
+gry-core = { path = "crates/gry-core" }
+gry-store = { path = "crates/gry-store" }
+gry-parse = { path = "crates/gry-parse" }
+gry-index = { path = "crates/gry-index" }
+gry-query = { path = "crates/gry-query" }
+gry-mcp = { path = "crates/gry-mcp" }
+
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
+regex = "1.11"
+globset = "0.4"
+ignore = "0.4"
+walkdir = "2.5"
+sha2 = "0.10"
+hex = "0.4"
+rayon = "1.10"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+zstd = "0.13"
+rmp-serde = "1.3"
+once_cell = "1.20"
+uuid = { version = "1.11", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+notify = "8.0"
+tempfile = "3.14"
+xxhash-rust = { version = "0.8", features = ["xxh3", "xxh64"] }
+tree-sitter = "0.25"
+itertools = "0.14"
+memchr = "2.7"
+toml = "0.8"
+serde_yaml = "0.9"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+panic = "abort"
+strip = "debuginfo"
+
+[profile.dev]
+opt-level = 1
+debug = 0
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.test]
+opt-level = 1
+debug = 0
+
+[profile.test.package."*"]
+opt-level = 2

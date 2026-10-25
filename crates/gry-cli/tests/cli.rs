@@ -1,0 +1,382 @@
+use serde_json::{json, Value};
+use std::fs;
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use tempfile::TempDir;
+
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_gry")
+}
+
+fn write(root: &Path, rel: &str, content: &str) {
+    let path = root.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, content).unwrap();
+}
+
+fn fixture() -> (TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    write(&root, "src/lib.rs", "pub struct Engine;\nimpl Engine { pub fn parse(&self) -> usize { 1 } }\nfn main() { let e = Engine; e.parse(); }\n");
+    write(&root, "docs/guide.md", "# Guide\n\n`Engine`.\n");
+    (dir, root)
+}
+
+fn run(cache: &Path, args: &[&str]) -> Value {
+    let output = Command::new(bin())
+        .arg("--cache-dir")
+        .arg(cache)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "gry {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| json!(String::from_utf8_lossy(&output.stdout).to_string()))
+}
+
+#[test]
+fn index_search_status_config_and_delete() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    let index = run(
+        &cache,
+        &["index", root.to_str().unwrap(), "--name", "cli-fixture"],
+    );
+    assert_eq!(index["nodes"].as_i64().unwrap() > 5, true);
+    let search = run(
+        &cache,
+        &["search", "cli-fixture", "parse", "--label", "Method"],
+    );
+    assert!(search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["name"] == "parse"));
+    let status = run(&cache, &["status", "cli-fixture"]);
+    assert_eq!(status["indexed"], true);
+    let projects = run(&cache, &["projects"]);
+    assert!(projects["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["name"] == "cli-fixture"));
+
+    let list = run(&cache, &["config", "list"]);
+    assert!(list["settings"].as_array().unwrap().len() >= 5);
+    let set = run(&cache, &["config", "set", "auto_index", "true"]);
+    assert_eq!(set["value"], "true");
+    let get = run(&cache, &["config", "get", "auto_index"]);
+    assert_eq!(get["value"], "true");
+    let reset = run(&cache, &["config", "reset", "auto_index"]);
+    assert_eq!(reset["value"], "false");
+    let mem = run(&cache, &["config", "set", "index_max_memory_mb", "2048"]);
+    assert_eq!(mem["value"], "2048");
+    let mem = run(&cache, &["config", "get", "index_max_memory_mb"]);
+    assert_eq!(mem["value"], "2048");
+    run(&cache, &["config", "reset", "index_max_memory_mb"]);
+    let doctor = run(&cache, &["doctor"]);
+    assert_eq!(doctor["ok"], true, "doctor: {doctor}");
+
+    let deleted = run(&cache, &["delete", "cli-fixture"]);
+    assert_eq!(deleted["status"], "deleted");
+}
+
+#[test]
+fn generic_tool_and_serve_stdio() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    run(
+        &cache,
+        &["index", root.to_str().unwrap(), "--name", "cli-serve"],
+    );
+
+    let cli = run(
+        &cache,
+        &[
+            "cli",
+            "search_graph",
+            "--project",
+            "cli-serve",
+            "--label",
+            "Method",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(cli["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["name"] == "parse"));
+
+    let mut child = Command::new(bin())
+        .arg("--cache-dir")
+        .arg(&cache)
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}})).unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
+        )
+        .unwrap();
+        writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_graph","arguments":{"project":"cli-serve","label":"Method"}}})).unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc":"2.0","id":4,"method":"shutdown"})
+        )
+        .unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let messages: Vec<Value> = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    assert!(messages
+        .iter()
+        .any(|m| m["result"]["serverInfo"]["name"] == "gry"));
+    assert!(messages.iter().any(|m| m["result"]["tools"]
+        .as_array()
+        .map(|t| t.len())
+        .unwrap_or(0)
+        == 17));
+    assert!(messages.iter().any(|m| m["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .contains("parse")));
+}
+
+#[test]
+fn install_dry_run_is_non_destructive() {
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .args(["install", "--client", "claude", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!home.path().join(".claude.json").exists());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["dry_run"], true);
+
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .args(["install", "--client", "claude"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config: Value =
+        serde_json::from_slice(&fs::read(home.path().join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(config["mcpServers"]["gry"]["args"][0], "serve");
+
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .args(["uninstall", "--client", "claude"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let config: Value =
+        serde_json::from_slice(&fs::read(home.path().join(".claude.json")).unwrap()).unwrap();
+    assert!(config["mcpServers"].get("gry").is_none());
+}
+
+#[test]
+fn memory_budget_rejects_clearly_oversized_estimates() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    let output = Command::new(bin())
+        .arg("--cache-dir")
+        .arg(&cache)
+        .env("GRY_MAX_INDEX_MEMORY_MB", "1")
+        .args(["index", root.to_str().unwrap(), "--name", "budget"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("memory budget"));
+}
+
+#[test]
+fn global_json_is_compact_on_one_line() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    run(
+        &cache,
+        &["index", root.to_str().unwrap(), "--name", "json-mode"],
+    );
+    let output = Command::new(bin())
+        .arg("--cache-dir")
+        .arg(&cache)
+        .args(["--json", "projects"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(text.lines().count(), 1, "expected compact JSON: {text}");
+    assert!(serde_json::from_str::<Value>(text.trim()).is_ok());
+}
+
+#[test]
+fn async_index_and_status() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    let queued = run(
+        &cache,
+        &[
+            "index",
+            root.to_str().unwrap(),
+            "--name",
+            "cli-async",
+            "--async",
+        ],
+    );
+    assert_eq!(queued["state"], "queued");
+    let mut succeeded = false;
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let status = run(
+            &cache,
+            &[
+                "index",
+                root.to_str().unwrap(),
+                "--name",
+                "cli-async",
+                "--status",
+            ],
+        );
+        let state = status["state"].as_str().unwrap_or("");
+        if state == "succeeded" {
+            succeeded = true;
+            break;
+        }
+        if state == "failed" {
+            panic!("async index failed: {status}");
+        }
+    }
+    assert!(succeeded, "async index did not finish");
+}
+
+#[test]
+fn test_impact_select_and_publish() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    write(
+        &root,
+        "src/math.c",
+        "int add(int a, int b) { return a + b; }\nint mul(int a, int b) { return add(a,b) * a; }\n",
+    );
+    write(
+        &root,
+        "tests/test_math.c",
+        "int add(int a, int b);\nint main(void) { return add(1,2) == 3 ? 0 : 1; }\n",
+    );
+    write(
+        &root,
+        ".gry.json",
+        r#"{"test_impact":{"version":1,"tests":{"presets":{"c":true},"test_globs":["tests/**"]},"rules":[{"id":"src","paths":["src/**"],"action":"referencing_tests"},{"id":"tests","paths":["tests/**"],"action":"referencing_tests"}],"unmapped_files":"run_all"}}"#,
+    );
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "a@b.c"]);
+    git(&["config", "user.name", "A"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "init"]);
+    let commit = {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let cache = dir.path().join("cache");
+    run(
+        &cache,
+        &["index", root.to_str().unwrap(), "--name", "impact"],
+    );
+    let coverage = dir.path().join("coverage");
+    fs::create_dir_all(&coverage).unwrap();
+    fs::write(coverage.join("meta.json"), serde_json::to_vec(&json!({"commit":commit,"platform":"test-platform","created_at":"2026-10-25T00:00:00Z"})).unwrap()).unwrap();
+    fs::write(
+        coverage.join("tests.tsv"),
+        "impact.src.math.add\timpact.tests.test_math.main\n",
+    )
+    .unwrap();
+    write(&root, "src/math.c", "int add(int a, int b) { return a + b + 0; }\nint mul(int a, int b) { return add(a,b) * a; }\n");
+    let selection = run(
+        &cache,
+        &[
+            "test-impact",
+            "select",
+            "--repo",
+            root.to_str().unwrap(),
+            "--base",
+            "main",
+            "--coverage",
+            coverage.to_str().unwrap(),
+            "--platform",
+            "test-platform",
+        ],
+    );
+    assert_eq!(selection["run_all"], false, "selection: {selection}");
+    assert!(selection["selected_tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["name"] == "main"));
+    let out = dir.path().join("bundle");
+    let receipt = run(
+        &cache,
+        &[
+            "test-impact",
+            "publish",
+            "--repo",
+            root.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--coverage",
+            coverage.to_str().unwrap(),
+            "--platform",
+            "test-platform",
+        ],
+    );
+    assert!(out.join("graph.db.zst").is_file());
+    assert!(out.join("receipt.json").is_file());
+    assert_eq!(receipt["commit"], commit);
+}

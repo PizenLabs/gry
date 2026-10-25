@@ -1,0 +1,23 @@
+[package]
+name = "gry-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+gry-core.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+hex.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+regex.workspace = true
+globset.workspace = true
+zstd.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]

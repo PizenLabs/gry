@@ -1,0 +1,50 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+*.profraw
+*.profdata
+lcov.info
+
+# Cargo local overrides
+.cargo/config.toml
+.cargo/config
+
+# Local gry index artifacts (exported graph, job state, caches)
+/.gry/
+/graph.db
+/graph.db-*
+/*.db-wal
+/*.db-shm
+
+# Benchmark / test output
+/criterion/
+/tests/output/
+
+# Release artifacts (make dist)
+/dist/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Editors and IDEs
+.idea/
+*.iml
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db

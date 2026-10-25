@@ -1,0 +1,23 @@
+[package]
+name = "gry-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+gry-core.workspace = true
+gry-store.workspace = true
+gry-index.workspace = true
+gry-parse.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+globset.workspace = true
+walkdir.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+zstd.workspace = true
+tempfile.workspace = true
+base64 = "0.22"

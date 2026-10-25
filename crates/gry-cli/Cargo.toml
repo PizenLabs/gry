@@ -1,0 +1,29 @@
+[package]
+name = "gry-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "gry — local-first code intelligence for AI agents"
+
+[[bin]]
+name = "gry"
+path = "src/main.rs"
+
+[dependencies]
+gry-core.workspace = true
+gry-store.workspace = true
+gry-index.workspace = true
+gry-query.workspace = true
+gry-mcp.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true

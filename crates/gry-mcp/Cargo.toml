@@ -1,0 +1,21 @@
+[package]
+name = "gry-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+gry-core.workspace = true
+gry-store.workspace = true
+gry-index.workspace = true
+gry-query.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

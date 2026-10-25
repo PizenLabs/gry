@@ -1,4 +1,7 @@
-# gry
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/PizenLabs/onpic/refs/heads/main/gry/gry.png" width="24%" alt="Lynx Logo" />
+
 
 **Local-first code intelligence for AI agents.**
 
@@ -7,14 +10,17 @@
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![MCP](https://img.shields.io/badge/MCP-stdio-6f42c1.svg)](https://modelcontextprotocol.io/)
 
-gry turns a repository into a persistent, queryable knowledge graph spanning source code, tests,
+</div>
+
+[gry]() turns a repository into a persistent, queryable knowledge graph spanning source code, tests,
 documentation, configuration, packages, and infrastructure. It serves that graph to coding agents
 over the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP, stdio) and exposes the
 same operations through a command-line interface.
 
-gry is an independent, Apache-2.0-licensed open-source project. It runs entirely on your machine:
+[gry]() is an independent, Apache-2.0-licensed open-source project. It runs entirely on your machine:
 no hosted service, API key, telemetry, or mandatory daemon. Everything is stored in a local SQLite
 database.
+
 
 > **Status: 1.0.** The 1.0 feature scope is complete. Feature coverage, evidence, and explicit
 > depth/breadth limits are recorded in [docs/CAPABILITIES.md](docs/CAPABILITIES.md); measured

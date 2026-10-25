@@ -1,0 +1,89 @@
+name: Bug report
+description: Report a reproducible defect in gry
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please search existing issues first.
+
+        **Do not report security vulnerabilities here.** Follow
+        [SECURITY.md](https://github.com/PizenLabs/gry/blob/main/SECURITY.md) instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: gry version
+      description: Output of `gry --version`.
+      placeholder: gry 1.0.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (x86_64)
+        - Linux (aarch64)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: install
+    attributes:
+      label: Installation method
+      description: How did you install gry?
+      placeholder: cargo install --path crates/gry-cli / make install / prebuilt
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest command sequence or fixture that reproduces the issue.
+      placeholder: |
+        1. gry index ./fixture
+        2. gry trace ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the full error message or incorrect output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Diagnostics
+      description: Output of `gry doctor --json` and, if relevant, `RUST_LOG=gry=debug <command>`.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I removed secrets, proprietary source, and personal paths from this report.
+          required: true

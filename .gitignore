@@ -1,3 +1,7 @@
+# The project changelog is part of the repository. Keep it tracked even when a
+# user-level global ignore excludes CHANGELOG.md.
+!CHANGELOG.md
+
 # Rust build artifacts
 /target/
 **/*.rs.bk

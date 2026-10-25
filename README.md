@@ -2,49 +2,102 @@
 
 **Local-first code intelligence for AI agents.**
 
+[![CI](https://github.com/PizenLabs/gry/actions/workflows/ci.yml/badge.svg)](https://github.com/PizenLabs/gry/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![MCP](https://img.shields.io/badge/MCP-stdio-6f42c1.svg)](https://modelcontextprotocol.io/)
+
 gry turns a repository into a persistent, queryable knowledge graph spanning source code, tests,
-documentation, configuration, packages and infrastructure. It serves that graph to coding agents over
-the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP, stdio) and exposes the same
-operations through a command-line interface.
+documentation, configuration, packages, and infrastructure. It serves that graph to coding agents
+over the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP, stdio) and exposes the
+same operations through a command-line interface.
 
-gry is an independent, MIT-licensed open-source project. It runs entirely on your machine: no hosted
-service, API key, telemetry or mandatory daemon. Everything is stored in a local SQLite database.
+gry is an independent, Apache-2.0-licensed open-source project. It runs entirely on your machine:
+no hosted service, API key, telemetry, or mandatory daemon. Everything is stored in a local SQLite
+database.
 
-> **Status: 1.0.** The 1.0 feature scope is complete. Feature coverage, evidence and explicit
+> **Status: 1.0.** The 1.0 feature scope is complete. Feature coverage, evidence, and explicit
 > depth/breadth limits are recorded in [docs/CAPABILITIES.md](docs/CAPABILITIES.md); measured
 > performance is in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+## Contents
+
+- [Why gry](#why-gry)
+- [At a glance](#at-a-glance)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [MCP integration](#mcp-integration)
+- [What it indexes](#what-it-indexes)
+- [Graph model](#graph-model)
+- [Incremental indexing](#incremental-indexing)
+- [Configuration](#configuration)
+- [Index modes](#index-modes)
+- [Test impact](#test-impact)
+- [Verification](#verification)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
 
 ## Why gry
 
 - **Structural answers, not file dumps.** Ask who calls a function, what a change reaches, how a
   service is deployed, or which tests to run. Results carry symbol identity, source ranges,
-  provenance and pagination instead of raw file contents.
+  provenance, and pagination instead of raw file contents.
 - **One graph across the whole repository.** Code, docs, ADRs, OpenAPI operations, package
-  manifests, Dockerfiles, Kubernetes, Helm, Kustomize, Terraform, CI and runtime observations live in
-  one model.
-- **Local and self-contained.** A single binary, bundled SQLite, statically linked grammars and
+  manifests, Dockerfiles, Kubernetes, Helm, Kustomize, Terraform, CI, and runtime observations live
+  in one model.
+- **Local and self-contained.** A single binary, bundled SQLite, statically linked grammars, and
   static token vectors. No network access at runtime.
 - **Fast incremental indexing.** Unchanged files are not read or parsed. A one-file edit on a
   10,000-file repository lands in about 233 ms p50; a full index of the same workload runs at about
   2,800 files/s.
-- **Honest uncertainty.** Resolution records exact, inferred, ambiguous and unresolved evidence.
+- **Honest uncertainty.** Resolution records exact, inferred, ambiguous, and unresolved evidence.
   Unsupported constructs and coverage gaps are reported rather than guessed.
 
-## Build
+## At a glance
 
-Requirements: Rust 1.85+ and a C toolchain (tree-sitter grammars and bundled SQLite are compiled by
-Cargo). The first build downloads crates; runtime has no network dependency.
+| | |
+|---|---|
+| **Interfaces** | MCP over stdio, first-class CLI, one-shot `gry cli <tool>` |
+| **Storage** | Local SQLite; no hosted service and no mandatory daemon |
+| **Languages** | 68 statically linked tree-sitter grammars plus a conservative lexical fallback |
+| **Scope** | Code, tests, docs, config, packages, infrastructure, and runtime traces |
+| **Privacy** | No network access, API keys, or telemetry at runtime |
+| **Platforms** | macOS and Linux (CI-tested) |
+
+## Installation
+
+### Requirements
+
+- Rust 1.85+ and Cargo
+- A C toolchain (tree-sitter grammars and bundled SQLite are compiled by Cargo)
+
+The first build downloads crates; the resulting binary has no network dependency at runtime.
+
+### From source
 
 ```bash
+git clone https://github.com/PizenLabs/gry.git
+cd gry
 cargo build --release
 ./target/release/gry --version
 ```
 
-Optional install:
+Install the binary into your Cargo bin directory:
 
 ```bash
 cargo install --path crates/gry-cli
 ```
+
+Or install it into `~/.local/bin` with the Makefile:
+
+```bash
+make install
+```
+
+Prebuilt binaries are not published yet. Use the source build above and verify it with
+`gry doctor`.
 
 ## Quick start
 
@@ -86,7 +139,7 @@ gry cli index_repository --repo-path /path/to/repo --mode full
 `gry cli <tool> --help` prints the tool's JSON schema. Arguments can also be supplied as
 `--args-file file.json` or as JSON on stdin.
 
-## MCP setup
+## MCP integration
 
 `gry serve` speaks MCP over stdio. Configure a client manually:
 
@@ -101,7 +154,7 @@ gry cli index_repository --repo-path /path/to/repo --mode full
 }
 ```
 
-Or let gry edit a client configuration safely (backup + atomic write; `--dry-run` supported):
+Or let gry edit a client configuration safely (backup and atomic write; `--dry-run` supported):
 
 ```bash
 gry install --client claude
@@ -118,20 +171,21 @@ gry install --list-clients
 gry uninstall --client claude
 ```
 
-15 tested JSON/TOML adapters are covered (Claude, Cursor, Windsurf, Gemini, OpenCode, Codex, Zed,
-Cline, Roo, Kilo, VS Code, Trae, Qwen, Augment, Amp). Unknown JSON is preserved; files that are not
-valid JSON are refused rather than overwritten. Other clients can be configured with `--config`.
+Fifteen tested JSON/TOML adapters are covered (Claude, Cursor, Windsurf, Gemini, OpenCode, Codex,
+Zed, Cline, Roo, Kilo, VS Code, Trae, Qwen, Augment, and Amp). Unknown JSON is preserved; files that
+are not valid JSON are refused rather than overwritten. Other clients can be configured with
+`--config`.
 
 ## What it indexes
 
 - **Code**: definitions, fields, methods, imports, calls, usages, inheritance, decorators,
-  complexity, MinHash fingerprints and Nomic token embeddings.
+  complexity, MinHash fingerprints, and Nomic token embeddings.
 - **Documents**: Markdown/RST/AsciiDoc sections, document-to-file/code references, ADRs, Mermaid
-  diagrams and OpenAPI operations. PDFs are read for text layers only (no OCR).
+  diagrams, and OpenAPI operations. PDFs are read for text layers only (no OCR).
 - **Configuration and packages**: JSON/YAML/TOML/INI/.env keys without values; package manifests
-  for npm, Cargo, Go, PyPI, Composer, Pub, Maven, Gradle, Hex, RubyGems and SwiftPM.
+  for npm, Cargo, Go, PyPI, Composer, Pub, Maven, Gradle, Hex, RubyGems, and SwiftPM.
 - **Infrastructure**: Dockerfiles, Compose, Kubernetes manifests, Helm charts, Kustomize,
-  Terraform/OpenTofu, Ansible, Make, CI workflows and deployment commands.
+  Terraform/OpenTofu, Ansible, Make, CI workflows, and deployment commands.
 - **Runtime observations**: `ingest_traces` stores observed caller→callee pairs and journeys by
   qualified name, so they survive reindexing.
 
@@ -140,7 +194,7 @@ C, C++, Java, C#, Ruby, PHP, Kotlin, Swift, Scala, Lua, Bash, Elixir, Haskell, O
 Julia, Zig, Nix, HCL, YAML, TOML, JSON, Markdown, Dockerfile, Make, CMake, SQL, GraphQL, HTML, CSS,
 SCSS, Vue, Svelte, Groovy, Erlang, F#, Solidity, PowerShell, Pascal, D, Verilog, VHDL, Ada, Common
 Lisp, Scheme, Elm, Fortran, CUDA, GLSL, Starlark, INI, Diff, Regex, GDScript, Luau, Nickel, Crystal,
-QML, Jinja, Prisma, Properties and more (68 statically linked grammars). Formats without a
+QML, Jinja, Prisma, Properties, and more (68 statically linked grammars). Formats without a
 compatible modern grammar use a conservative lexical fallback (Perl, Vim, Fish, COBOL, WGSL/HLSL,
 IDL formats, Lisp dialects); this is explicitly marked in node properties.
 
@@ -149,13 +203,13 @@ IDL formats, Lisp dialects); this is explicitly marked in node properties.
 Node labels include `Project`, `Package`, `Folder`, `File`, `Module`, `Section`, `Class`, `Struct`,
 `Interface`, `Trait`, `Enum`, `Type`, `Function`, `Method`, `Field`, `Variable`, `Constant`,
 `Macro`, `Decorator`, `Route`, `Channel`, `Process`, `EnvVar`, `Resource`, `Chart`, `Image`,
-`Branch`, `ADR`, `Diagram` and `DiagramElement`.
+`Branch`, `ADR`, `Diagram`, and `DiagramElement`.
 
 Edges include `DEFINES`, `DEFINES_METHOD`, `IMPORTS`, `CALLS`, `CALL_REFERENCE`, `USAGE`,
 `INHERITS`, `IMPLEMENTS`, `OVERRIDE`, `DECORATES`, `DATA_FLOWS`, `HTTP_CALLS`, `ASYNC_CALLS`,
 `EMITS`, `LISTENS_ON`, `HANDLES`, `SPAWNS`, `CONFIGURES`, `INFRA_MAPS`, `CONNECTS_TO`, `DEPLOYS`,
 `DEPENDS_ON`, `REFERENCES_FILE`, `MENTIONS`, `TESTS`, `SIMILAR_TO`, `SEMANTICALLY_RELATED`,
-`FILE_CHANGES_WITH`, `HAS_BRANCH`, the `CROSS_*` family and internal diagram/ADR edges. Every edge
+`FILE_CHANGES_WITH`, `HAS_BRANCH`, the `CROSS_*` family, and internal diagram/ADR edges. Every edge
 keeps provenance/confidence properties where the resolver provides them.
 
 Qualified names follow `<project>.<path>.<scope>.<name>`; File QNs keep the extension
@@ -188,7 +242,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the pipeline and consistenc
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GRY_CACHE_DIR` | `~/.cache/gry` | Cache root for the database, settings, jobs and locks |
+| `GRY_CACHE_DIR` | `~/.cache/gry` | Cache root for the database, settings, jobs, and locks |
 | `GRY_DB` | `<cache>/graph.db` | SQLite database file |
 | `GRY_ALLOWED_ROOT` | unset | Confine `index_repository` to a directory |
 | `GRY_WORKERS` | `min(8, cores)` | Indexing worker bound |
@@ -224,8 +278,8 @@ gry config reset auto_watch
 }
 ```
 
-`.gitignore`, nested `.gitignore`, `.gryignore` and global git excludes shape discovery. The safety
-core (`.git`, `node_modules`, worktrees) cannot be re-included.
+`.gitignore`, nested `.gitignore`, `.gryignore`, and global git excludes shape discovery. The
+safety core (`.git`, `node_modules`, worktrees) cannot be re-included.
 
 ## Index modes
 
@@ -236,14 +290,14 @@ core (`.git`, `node_modules`, worktrees) cannot be re-included.
 | `fast` | Filtered discovery, no semantic relatedness/doc candidates |
 | `cross-repo-intelligence` | Link routes and channels across already-indexed projects |
 
-`index_repository(async=true)` starts a background job in the MCP process. One-shot CLI
-`--async` starts a detached worker and writes status under `<cache>/jobs/`; poll with
+`index_repository(async=true)` starts a background job in the MCP process. One-shot CLI `--async`
+starts a detached worker and writes status under `<cache>/jobs/`; poll with
 `gry index <repo> --status`. No long-lived daemon is required.
 
 ## Test impact
 
 `gry test-impact select` is conservative: it never omits a test suite unless admitted per-test
-coverage and a static mapping prove it safe. Missing config, Git history or coverage returns
+coverage and a static mapping prove it safe. Missing config, Git history, or coverage returns
 `run_all`. `publish` writes a graph artifact + coverage + receipt bundle to `--out`.
 
 ```bash
@@ -252,8 +306,8 @@ gry test-impact publish --repo . --out ./bundle --coverage ./coverage
 ```
 
 Coverage format: `meta.json` (`commit`, `platform`, `created_at`), `tests.tsv`
-(`function_qn<TAB>test_qn`), optional `functions.tsv`. Narrowing currently models C/C++-style test
-frameworks; other languages are accepted as inputs but selection falls back safely.
+(`function_qn<TAB>test_qn`), and optional `functions.tsv`. Narrowing currently models C/C++-style
+test frameworks; other languages are accepted as inputs but selection falls back safely.
 
 ## Verification
 
@@ -263,14 +317,8 @@ cargo build --release
 tests/differential.sh          # optional: requires the reference binary on PATH
 ```
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full verification checklist, test layout and
-release process.
-
-## Scope
-
-gry is a code-intelligence engine, not a graph viewer. Browser UI, 3D graph rendering, HTTP UI
-endpoints, embedded frontend assets and the UI-only `system_structure` architecture projection are
-deliberately out of scope.
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full verification checklist, test layout,
+and release process.
 
 ## Documentation
 
@@ -278,13 +326,29 @@ deliberately out of scope.
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, storage, indexing, resolution, performance model |
 | [docs/CAPABILITIES.md](docs/CAPABILITIES.md) | Feature coverage, supported languages, explicit limits |
-| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Measured performance, workloads and methodology |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Build, test, verification and release workflow |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Measured performance, workloads, and methodology |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Build, test, verification, and release workflow |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [THIRD_PARTY.md](THIRD_PARTY.md) | Third-party licenses and attribution |
 
-## License and attribution
+## Contributing
 
-gry is MIT licensed; see [LICENSE](LICENSE). It reuses tree-sitter grammar crates, SQLite (bundled by
-`rusqlite`) and the Apache-2.0 Nomic `nomic-embed-code` token vectors. Details:
-[THIRD_PARTY.md](THIRD_PARTY.md).
+gry welcomes contributions of all kinds: bug reports, feature proposals, documentation, tests, and
+code. Read [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, commit conventions, the
+verification checklist, and the pull-request process.
+
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). By
+participating, you agree to uphold it.
+
+## Security
+
+Please do not report security vulnerabilities in public issues. Use GitHub's private
+vulnerability reporting or contact the maintainers as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+gry is licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for
+attribution.
+
+gry reuses tree-sitter grammar crates, SQLite (bundled by `rusqlite`), and Apache-2.0 Nomic
+`nomic-embed-code` token vectors. Details: [THIRD_PARTY.md](THIRD_PARTY.md).

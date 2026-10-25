@@ -1,0 +1,20 @@
+gry
+Copyright 2026 The gry authors
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+This product includes token-vector data derived from the Nomic
+nomic-embed-code model:
+
+  Nomic token vectors
+  Copyright Nomic AI
+  Licensed under the Apache License, Version 2.0
+  https://huggingface.co/nomic-ai/nomic-embed-code
+
+The upstream NOTICE and license for the token vectors are retained in
+third_party/nomic/NOTICE and third_party/nomic/LICENSE.
+
+Third-party dependencies and their licenses are documented in
+THIRD_PARTY.md. Their respective copyright notices and license texts
+apply to those components.

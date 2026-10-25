@@ -155,6 +155,9 @@ rebuilding from source.
 - [ARCHITECTURE.md](ARCHITECTURE.md) explains how the system works and its contracts.
 - [CAPABILITIES.md](CAPABILITIES.md) is the coverage matrix and the single place for known limits.
 - [BENCHMARKS.md](BENCHMARKS.md) is the single place for measured numbers.
+- [CONTRIBUTING.md](../CONTRIBUTING.md) is the contributor workflow and pull-request checklist.
+- [SECURITY.md](../SECURITY.md) is the vulnerability reporting policy and threat scope.
+- [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) is the community behavior standard.
 - This guide is the single place for build, test and release procedure.
 
 When behavior changes, update the capability matrix and the changelog together. Keep measured claims

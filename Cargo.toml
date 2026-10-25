@@ -14,7 +14,7 @@ members = [
 edition = "2021"
 rust-version = "1.85"
 version = "1.0.0"
-license = "MIT"
+license = "Apache-2.0"
 authors = ["The gry authors"]
 
 [workspace.dependencies]

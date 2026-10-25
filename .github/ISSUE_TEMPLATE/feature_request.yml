@@ -1,0 +1,52 @@
+name: Feature request
+description: Propose a capability or workflow improvement
+title: "[feat]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check [docs/CAPABILITIES.md](https://github.com/PizenLabs/gry/blob/main/docs/CAPABILITIES.md)
+        first. It records the current scope and known limits.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is difficult or impossible today? Describe the user problem, not just the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What should gry do? Include commands, MCP tools, or graph shapes where relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+
+  - type: input
+    id: context
+    attributes:
+      label: Repository context
+      description: Language mix, repository size, and infrastructure that matter for this request.
+      placeholder: Rust + TypeScript monorepo, 12k files, Kubernetes and Helm
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: This request is within the documented project scope, or I explain why the scope should change.
+          required: false

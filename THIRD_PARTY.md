@@ -1,8 +1,8 @@
 # Third-Party Notices
 
-gry is MIT licensed (see `LICENSE`). It depends on open-source Rust crates and redistributes the
-Apache-2.0 Nomic token vectors. All direct Rust dependencies report OSI-approved licenses;
-`cargo metadata` reports no `UNKNOWN` license among the 226 resolved packages.
+gry is licensed under the Apache License 2.0 (see `LICENSE` and `NOTICE`). It depends on open-source
+Rust crates and redistributes the Apache-2.0 Nomic token vectors. All direct Rust dependencies report
+OSI-approved licenses; `cargo metadata` reports no `UNKNOWN` license among the 273 resolved packages.
 
 ## Nomic token vectors — Apache-2.0
 

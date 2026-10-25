@@ -64,21 +64,22 @@ impl JobManager {
                 }
             }
         }
-        let status = Arc::new(Mutex::new(JobStatus {
+        let initial = JobStatus {
             project: project.clone(),
             state: "queued".to_string(),
             started_at: gry_store::now_iso(),
             finished_at: None,
             error: None,
             report: None,
-        }));
+        };
+        let status = Arc::new(Mutex::new(initial.clone()));
         self.jobs.lock().insert(project.clone(), status.clone());
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel.lock().insert(project.clone(), cancel.clone());
         write_job_status(
             &config,
             &project,
-            &serde_json::to_value(status.lock().clone()).unwrap_or_default(),
+            &serde_json::to_value(&initial).unwrap_or_default(),
         );
         let jobs = self.jobs.clone();
         let project_for_thread = project.clone();
@@ -122,8 +123,10 @@ impl JobManager {
                 let _ = &jobs;
             })
             .map_err(|e| gry_core::GryError::msg(format!("failed to start index job: {e}")))?;
-        let out = status.lock().clone();
-        Ok(out)
+        // Return the state at submission time. The worker may already have
+        // moved on (or even failed), but `start` reports that the job was
+        // accepted; callers poll `status` for terminal states.
+        Ok(initial)
     }
 
     pub fn status(&self, project: &str) -> Option<JobStatus> {

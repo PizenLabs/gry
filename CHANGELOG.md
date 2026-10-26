@@ -45,6 +45,15 @@
   complete list; the advertised page size is the same whether or not the client
   sent a cursor.
 
+### Fixed
+
+- crates.io publishing no longer aborts midway when the registry index lags
+  behind an upload. `scripts/publish.sh` publishes one crate per invocation,
+  waits (up to `WAIT_TIMEOUT` seconds) only for the dependencies a failed
+  publish actually needs, resumes interrupted runs by skipping versions that
+  are already published, and treats a timed-out upload wait as success once the
+  crate appears.
+
 ## 1.0.0 — 2026-10-26
 
 First independent release of gry: local-first code intelligence for AI agents.

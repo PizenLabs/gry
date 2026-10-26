@@ -197,10 +197,17 @@ Publish manually (requires a crates.io token in `CARGO_REGISTRY_TOKEN`, or `carg
 CONFIRM=yes make publish
 ```
 
-`scripts/publish.sh` publishes in dependency order, waits for the registry index between crates,
-retries transient failures, and skips versions that are already published. Override the delay with
-`PUBLISH_DELAY` (seconds, default 20) and the per-crate attempt count with `MAX_ATTEMPTS` (default
-3). Pass `--no-verify` to skip the per-crate verification build.
+`scripts/publish.sh` publishes each crate with its own `cargo publish -p <crate>` invocation in
+dependency order, retries transient failures, and skips versions that are already published. When a
+publish fails because a sibling crate is still missing from the registry index, it waits (up to
+`WAIT_TIMEOUT` seconds) for that dependency and retries. Do not run a bare `cargo publish` at the
+workspace root: Cargo then waits for every uploaded crate to appear in the index with a short
+built-in timeout, and a crates.io backlog aborts the remaining crates.
+Override the poll interval and retry delay with `PUBLISH_DELAY` (seconds, default 20), the
+per-dependency index wait with `WAIT_TIMEOUT` (seconds, default 900), and the attempt count with
+`MAX_ATTEMPTS` (default 3). Pass `--no-verify` to skip the per-crate verification build. If a run is
+interrupted or times out mid-way, rerun the same command: crates that are already on crates.io are
+skipped and the remaining ones continue.
 
 For automated releases, add a repository secret named `CARGO_REGISTRY_TOKEN` containing a crates.io
 API token with publish scope. On a `v*` tag the release workflow checks that the tag matches the

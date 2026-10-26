@@ -15,15 +15,20 @@ edition = "2021"
 rust-version = "1.85"
 version = "1.0.0"
 license = "Apache-2.0"
-authors = ["The gry authors"]
+authors = ["PizenLabs"]
+repository = "https://github.com/PizenLabs/gry"
+homepage = "https://github.com/PizenLabs/gry"
+readme = "README.md"
+keywords = ["code-intelligence", "mcp", "tree-sitter", "code-graph", "static-analysis"]
+categories = ["development-tools", "parsing", "command-line-utilities"]
 
 [workspace.dependencies]
-gry-core = { path = "crates/gry-core" }
-gry-store = { path = "crates/gry-store" }
-gry-parse = { path = "crates/gry-parse" }
-gry-index = { path = "crates/gry-index" }
-gry-query = { path = "crates/gry-query" }
-gry-mcp = { path = "crates/gry-mcp" }
+gry-core = { version = "1.0.0", path = "crates/gry-core" }
+gry-store = { version = "1.0.0", path = "crates/gry-store" }
+gry-parse = { version = "1.0.0", path = "crates/gry-parse" }
+gry-index = { version = "1.0.0", path = "crates/gry-index" }
+gry-query = { version = "1.0.0", path = "crates/gry-query" }
+gry-mcp = { version = "1.0.0", path = "crates/gry-mcp" }
 
 anyhow = "1.0"
 thiserror = "2.0"

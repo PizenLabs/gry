@@ -455,9 +455,9 @@ build_from_source() {
   log "building gry from source (this can take several minutes)"
   root="$TMP/cargo"
   if [ "$VERSION" = "latest" ]; then
-    cargo install --git "$REPO_URL" --locked --root "$root" gry-cli
+    cargo install --git "$REPO_URL" --locked --root "$root" gry
   else
-    cargo install --git "$REPO_URL" --locked --tag "$VERSION" --root "$root" gry-cli
+    cargo install --git "$REPO_URL" --locked --tag "$VERSION" --root "$root" gry
   fi
   [ -x "$root/bin/gry" ] || die "source build did not produce a gry binary"
   install_binary "$root/bin/gry"

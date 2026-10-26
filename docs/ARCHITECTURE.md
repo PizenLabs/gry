@@ -33,7 +33,7 @@ flowchart TD
 | `gry-index` | Discovery, parallel extraction, parse cache, graph building/resolution, semantic passes, publication, jobs, watcher, cross-repo |
 | `gry-query` | Search/snippets/outlines, trace, architecture, schema, compare, Cypher, impact, test impact, ADR, traces |
 | `gry-mcp` | Tool schemas/profiles, JSON-RPC transport, handlers, prompts, output budgeting |
-| `gry-cli` | `gry` binary: commands, one-shot tool invocation, install/uninstall, async worker, test-impact CLI |
+| `gry` | `gry` binary: commands, one-shot tool invocation, install/uninstall, async worker, test-impact CLI |
 
 Domain logic does not depend on the MCP transport or CLI presentation. There is one node/edge model
 and one graph implementation.

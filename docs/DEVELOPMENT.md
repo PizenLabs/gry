@@ -12,7 +12,7 @@ crates/
   gry-index/   discovery, pipeline, delta indexing, resolution, jobs, watcher
   gry-query/   search, snippets, trace, architecture, Cypher, impact, test impact
   gry-mcp/     JSON-RPC transport, tool schemas, handlers, prompts, rendering
-  gry-cli/     the `gry` binary and its commands
+  gry-cli/     package `gry`: the binary and its commands
 docs/          architecture, capabilities, benchmarks, this guide
 tests/         differential fixture and helper scripts
 scripts/       benchmark and one-line installer helpers
@@ -33,7 +33,13 @@ cargo build --release
 ./target/release/gry --version
 ```
 
-Install from the workspace:
+Install the published release from crates.io:
+
+```bash
+cargo install gry --locked
+```
+
+Or install the current checkout:
 
 ```bash
 cargo install --path crates/gry-cli
@@ -47,7 +53,7 @@ Development builds use `opt-level = 1` for the workspace and `opt-level = 2` for
 cargo test --workspace
 ```
 
-Current result: **118 tests pass across 19 suites** (`cargo test --workspace`, 2026-10-26).
+Current result: **123 tests pass across 19 suites** (`cargo test --workspace`, 2026-10-26).
 
 | Area | Coverage |
 |---|---|
@@ -57,10 +63,10 @@ Current result: **118 tests pass across 19 suites** (`cargo test --workspace`, 2
 | `gry-index` | full/delta indexing, deletion, artifact round-trip, cross-repo linking, Git-history coupling, failed/cancelled generation preservation, incremental-vs-clean consistency (Rust and C, late imports/config/docs) |
 | `gry-query` | search/snippets/outlines, Cypher (including snapshot cursors), trace, schema, coverage, compare, architecture, ADR, traces |
 | `gry-mcp` | all 17 tools, prompts, profiles, errors |
-| `gry-cli` | index/search/search-code/status/config/delete, doctor, compact `--json`, memory budget, generic tool, stdio server, install/uninstall, async, test-impact select/publish |
+| `gry` | index/search/search-code/status/config/delete, doctor, compact `--json`, memory budget, generic tool, stdio server, install/uninstall, async, test-impact select/publish |
 
 Test counts by crate: core 23, store 6, parse 31, index 8 unit + 11 integration, query 22 unit +
-2 integration, mcp 6 unit + 2 contract, cli 7.
+2 integration, mcp 7 unit + 2 contract, cli 11.
 
 ## Verification checklist
 
@@ -159,8 +165,49 @@ The check is skipped with a clear message when the reference binary is not insta
    `https://github.com/PizenLabs/gry/releases/latest/download/install.sh` and is the
    canonical one-line install link.
 
+6. The same tag publishes all seven crates to crates.io from the
+   `publish-crates` job. Set the `CARGO_REGISTRY_TOKEN` repository secret once
+   before the first release (see [crates.io publishing](#cratesio-publishing)).
+
 `gry update` is intentionally not implemented: installs are managed by the installer, package
 manager, or by rebuilding from source.
+
+## crates.io publishing
+
+The published packages are `gry-core`, `gry-store`, `gry-parse`, `gry-index`, `gry-query`,
+`gry-mcp`, and `gry`. They are released together at the workspace version and must be published in
+that dependency order. Repository, homepage, readme, keywords, categories, and `rust-version` are
+inherited from `[workspace.package]`; each crate adds its own description. Internal dependencies
+carry both `path` and `version` in `[workspace.dependencies]`, so Cargo rewrites them to registry
+requirements when packaging.
+
+Validate everything locally without uploading:
+
+```bash
+make publish-dry-run
+```
+
+The dry run validates each package's contents and metadata with `cargo package`. A true
+`cargo publish --dry-run` resolves sibling crates from crates.io, so it only succeeds for `gry-core`
+before the first publish and for later crates once their dependencies are live.
+
+Publish manually (requires a crates.io token in `CARGO_REGISTRY_TOKEN`, or `cargo login`):
+
+```bash
+CONFIRM=yes make publish
+```
+
+`scripts/publish.sh` publishes in dependency order, waits for the registry index between crates,
+retries transient failures, and skips versions that are already published. Override the delay with
+`PUBLISH_DELAY` (seconds, default 20) and the per-crate attempt count with `MAX_ATTEMPTS` (default
+3). Pass `--no-verify` to skip the per-crate verification build.
+
+For automated releases, add a repository secret named `CARGO_REGISTRY_TOKEN` containing a crates.io
+API token with publish scope. On a `v*` tag the release workflow checks that the tag matches the
+workspace version, then publishes all crates after the GitHub release assets are uploaded.
+
+Note that crates.io does not allow wildcard (`*`) dependency requirements, which is why the
+tree-sitter grammars in `gry-parse` are pinned to resolved versions.
 
 ## Documentation conventions
 

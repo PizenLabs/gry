@@ -6,6 +6,7 @@
 **Local-first code intelligence for AI agents.**
 
 [![CI](https://github.com/PizenLabs/gry/actions/workflows/ci.yml/badge.svg)](https://github.com/PizenLabs/gry/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/gry.svg)](https://crates.io/crates/gry)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![MCP](https://img.shields.io/badge/MCP-stdio-6f42c1.svg)](https://modelcontextprotocol.io/)
@@ -107,8 +108,19 @@ shell PATH when needed (`--no-skill` and `--no-modify-path` opt out).
 
 ### Requirements
 
-- Rust 1.85+ and Cargo (source builds only)
+- Rust 1.85+ and Cargo (source installs and builds)
 - A C toolchain (tree-sitter grammars and bundled SQLite are compiled by Cargo)
+
+### From crates.io
+
+```bash
+cargo install gry --locked
+```
+
+This builds the `gry` binary and installs it into `~/.cargo/bin`. Use
+`cargo install gry --locked --force` to upgrade an existing install. The
+supporting libraries are published as `gry-core`, `gry-store`, `gry-parse`,
+`gry-index`, `gry-query`, and `gry-mcp`.
 
 ### From source
 

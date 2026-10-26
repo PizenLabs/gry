@@ -4,6 +4,14 @@
 
 ### Added
 
+- crates.io publishing for all seven crates. The CLI package is published as
+  `gry`, so `cargo install gry --locked` installs the binary. Release metadata
+  (repository, homepage, readme, keywords, categories) is inherited from
+  `[workspace.package]`, internal dependencies carry registry versions, and the
+  tree-sitter grammar dependencies are pinned because crates.io rejects
+  wildcard requirements. `make publish-dry-run` and `CONFIRM=yes make publish`
+  drive `scripts/publish.sh`, and a tag-triggered `publish-crates` job uses the
+  `CARGO_REGISTRY_TOKEN` secret.
 - One-line installer (`scripts/install.sh`) published with each release:
   detects macOS/Linux architecture (including Rosetta) and musl/glibc, verifies
   SHA-256, installs the prebuilt binary, falls back to a Cargo source build,

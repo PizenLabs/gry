@@ -10,6 +10,9 @@ OSI-approved licenses; `cargo metadata` reports no `UNKNOWN` license among the 2
 
 - `code_tokens.txt` — filtered vocabulary (40,856 tokens)
 - `code_vectors.bin` — 40,856 × 768 int8 unit vectors
+- `code_vectors.bin.xz` — the same vector blob, xz-compressed; this compressed form is what
+  `gry-core` bundles so the crate stays below crates.io's 10 MiB upload limit (decoded lazily at
+  runtime)
 - `LICENSE` — Apache License 2.0
 - `NOTICE` — attribution
 

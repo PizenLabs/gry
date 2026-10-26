@@ -55,6 +55,7 @@ chrono = { version = "0.4", features = ["serde"] }
 notify = "8.0"
 tempfile = "3.14"
 xxhash-rust = { version = "0.8", features = ["xxh3", "xxh64"] }
+lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "xz"] }
 tree-sitter = "0.25"
 itertools = "0.14"
 memchr = "2.7"

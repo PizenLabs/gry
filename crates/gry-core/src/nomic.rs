@@ -6,19 +6,24 @@
 //!
 //! The asset paths are crate-relative so the published package is
 //! self-contained; the repository copies are symlinks to `third_party/nomic`.
+//!
+//! The vector blob is stored xz-compressed so the `.crate` stays below the
+//! crates.io 10 MiB upload limit. It is decoded once, lazily, on first use.
 
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::io::{Cursor, Read};
 
 pub const DIM: usize = 768;
 pub const SCALE: f32 = 127.0;
 
 const TOKENS_TEXT: &str = include_str!("../assets/nomic/code_tokens.txt");
-const VECTOR_BYTES: &[u8] = include_bytes!("../assets/nomic/code_vectors.bin");
+const VECTOR_XZ: &[u8] = include_bytes!("../assets/nomic/code_vectors.bin.xz");
 
 struct Table {
     index: HashMap<&'static str, u32>,
     count: usize,
+    bytes: Vec<u8>,
 }
 
 static TABLE: Lazy<Table> = Lazy::new(|| {
@@ -27,18 +32,30 @@ static TABLE: Lazy<Table> = Lazy::new(|| {
     for (i, token) in tokens.iter().enumerate() {
         index.entry(*token).or_insert(i as u32);
     }
-    let header_count = u32::from_le_bytes(VECTOR_BYTES[0..4].try_into().unwrap()) as usize;
-    let header_dim = u32::from_le_bytes(VECTOR_BYTES[4..8].try_into().unwrap()) as usize;
+
+    let mut bytes = Vec::with_capacity(8 + tokens.len() * DIM);
+    lzma_rust2::XzReader::new(Cursor::new(VECTOR_XZ), false)
+        .read_to_end(&mut bytes)
+        .expect("bundled Nomic vector blob is corrupt");
+
+    let header_count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let header_dim = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
     assert_eq!(header_dim, DIM, "unexpected Nomic vector dimension");
     assert_eq!(
         header_count,
         tokens.len(),
         "Nomic token/vector count mismatch"
     );
-    assert!(VECTOR_BYTES.len() >= 8 + header_count * DIM);
+    assert_eq!(
+        bytes.len(),
+        8 + header_count * DIM,
+        "Nomic vector blob size mismatch"
+    );
+
     Table {
         index,
         count: header_count,
+        bytes,
     }
 });
 
@@ -49,9 +66,10 @@ pub fn token_count() -> usize {
 
 /// Look up the raw int8 vector for a token (zero-copy).
 pub fn token_vector(token: &str) -> Option<&'static [i8]> {
-    let idx = *TABLE.index.get(token)? as usize;
+    let table = &*TABLE;
+    let idx = *table.index.get(token)? as usize;
     let start = 8 + idx * DIM;
-    let slice = &VECTOR_BYTES[start..start + DIM];
+    let slice = &table.bytes[start..start + DIM];
     // SAFETY: i8 and u8 have identical layout; the blob is a byte array.
     Some(unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const i8, DIM) })
 }

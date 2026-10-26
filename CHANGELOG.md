@@ -1,6 +1,24 @@
 # Changelog
 
-## [Unreleased]
+## 1.0.2 — 2026-10-26
+
+### Fixed
+
+- Publishing no longer stalls when a crate exists on crates.io but is missing
+  from the sparse registry index. `scripts/publish.sh` now requires index
+  visibility, names the dependency that is blocking a publish, and verifies
+  that every crate in the workspace is resolvable once the run finishes.
+- `gry-mcp` and `gry` were uploaded but never appeared in the registry index,
+  which made `cargo publish -p gry` fail with `no matching package named
+  'gry-mcp'`. The 1.0.2 release republishes both crates and confirms their
+  index entries before finishing.
+
+### Changed
+
+- Internal workspace dependencies now require `1.0.2` instead of `1.0.0`, so a
+  published crate cannot resolve to an older sibling from the same workspace.
+
+## 1.0.1 — 2026-10-26
 
 ### Added
 

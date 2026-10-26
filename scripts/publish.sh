@@ -92,6 +92,9 @@ done_publishing() {
   published "$crate" || indexed "$crate"
 }
 
+# Report a crate that crates.io accepted but the sparse index does not serve,
+# which is the state that makes dependents fail with "no matching package".
+
 wait_for_index() {
   local crate="$1" waited=0
   [ "$DRY_RUN" = "1" ] && return 0
@@ -107,23 +110,52 @@ wait_for_index() {
   log "${crate} ${VERSION} is available in the index"
 }
 
-# Wait until every internal dependency of a crate that is already on crates.io
-# is also served by the index. Publishing a crate whose dependency is only in
-# the API but not yet in the index fails with "no matching package".
+# Wait until every internal dependency of a crate is served by the index.
+# Publishing a crate whose dependency is only in the API but not yet in the
+# index fails with "no matching package".
 wait_for_deps() {
   local crate="$1" dep
   for dep in "${CRATES[@]}"; do
     [ "$dep" = "$crate" ] && return 0
     if done_publishing "$dep"; then
+      if indexed "$dep"; then
+        continue
+      fi
+      if published "$dep"; then
+        log "${dep} ${VERSION} is on crates.io but not in the registry index yet"
+      fi
       wait_for_index "$dep" || return 1
     fi
   done
   return 0
 }
 
+# Fail the run unless every workspace crate is resolvable through the index.
+verify_index() {
+  local crate missing=()
+  for crate in "${CRATES[@]}"; do
+    if indexed "$crate"; then
+      log "verified ${crate} ${VERSION} in the registry index"
+    else
+      missing+=("$crate")
+      log "error: ${crate} ${VERSION} is not in the registry index" >&2
+    fi
+  done
+  if [ "${#missing[@]}" -ne 0 ]; then
+    die "missing from the registry index: ${missing[*]}; retry later or check https://status.crates.io"
+  fi
+}
+
 publish_one() {
-  local crate="$1" attempt=1 status log_file propagation
-  if [ "$SKIP_PUBLISHED" = "1" ] && done_publishing "$crate"; then
+  local crate="$1" attempt=1 status log_file propagation missing_dep
+  if [ "$SKIP_PUBLISHED" = "1" ] && published "$crate"; then
+    if wait_for_index "$crate"; then
+      log "${crate} ${VERSION} is already on crates.io, skipping"
+      return 0
+    fi
+    die "${crate} ${VERSION} is uploaded but missing from the registry index; cannot continue"
+  fi
+  if [ "$SKIP_PUBLISHED" = "1" ] && indexed "$crate"; then
     log "${crate} ${VERSION} is already on crates.io, skipping"
     return 0
   fi
@@ -149,18 +181,32 @@ publish_one() {
       "$log_file"; then
       propagation=1
     fi
+    missing_dep="$(sed -n 's/.*no matching package named `\([^`]*\)` found.*/\1/p' "$log_file" | head -n 1)"
     rm -f "$log_file"
 
     if [ "$SKIP_PUBLISHED" = "1" ]; then
-      # The upload itself may have succeeded before the wait timed out.
-      if published "$crate"; then
-        if wait_for_index "$crate"; then
-          log "${crate} ${VERSION} was uploaded; treating as published"
-          return 0
+      case " ${CRATES[*]} " in
+      *" ${missing_dep:-__none__} "*)
+        if ! published "$missing_dep"; then
+          die "${crate} depends on ${missing_dep} ${VERSION}, which is not on crates.io; publish it first"
         fi
-      elif [ "$propagation" = "1" ] && wait_for_deps "$crate"; then
-        log "internal dependencies are in the index; retrying ${crate}"
-      fi
+        if ! wait_for_index "$missing_dep"; then
+          die "${missing_dep} ${VERSION} is on crates.io but missing from the registry index; retry later or check https://status.crates.io"
+        fi
+        log "${missing_dep} ${VERSION} is now in the index; retrying ${crate}"
+        ;;
+      *)
+        # The upload itself may have succeeded before the wait timed out.
+        if published "$crate"; then
+          if wait_for_index "$crate"; then
+            log "${crate} ${VERSION} was uploaded; treating as published"
+            return 0
+          fi
+        elif [ "$propagation" = "1" ] && wait_for_deps "$crate"; then
+          log "internal dependencies are in the index; retrying ${crate}"
+        fi
+        ;;
+      esac
     fi
 
     if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
@@ -189,5 +235,7 @@ for i in "${!CRATES[@]}"; do
   crate="${CRATES[$i]}"
   publish_one "$crate"
 done
+
+verify_index
 
 log "done"

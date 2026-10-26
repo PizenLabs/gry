@@ -4,6 +4,28 @@
 
 ### Added
 
+- One-line installer (`scripts/install.sh`) published with each release:
+  detects macOS/Linux architecture (including Rosetta) and musl/glibc, verifies
+  SHA-256, installs the prebuilt binary, falls back to a Cargo source build,
+  configures the shell PATH, and runs `gry install --client auto` plus the agent
+  skill setup. Supports `--client`, `--prefix`, `--version`, `--from-source`,
+  `--no-mcp`, `--no-skill`, `--index`, `--dry-run`, and `--uninstall`.
+- Release workflow builds macOS arm64/x86_64 and Linux glibc/musl on x86_64 and
+  aarch64, publishes tarballs, per-asset checksums, `SHA256SUMS`, and the
+  installer.
+- `gry install --client auto` and `--client all`, and the matching
+  `gry uninstall` forms. Auto-detection checks client config files, harness home
+  directories, macOS application bundles, and `PATH` executables, so the
+  installer can configure only the agents actually in use.
+- Platform-aware VS Code family paths: VS Code, Cline, Roo, Kilo, and Trae use
+  `~/Library/Application Support` on macOS instead of the XDG path.
+- Separate `claude-desktop` adapter using the Claude Desktop app config
+  (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS,
+  `~/.config/Claude/claude_desktop_config.json` on Linux). The existing `claude`
+  adapter remains Claude Code (`~/.claude.json`).
+- `gry install --skill` now also writes the skill to
+  `~/.claude/skills/gry/SKILL.md` and
+  `~/.config/opencode/skills/gry/SKILL.md` when those harness directories exist.
 - `gry install --client ohgo` and matching uninstall: writes OHGO's
   `~/.ohgo/settings.json` `mcp.servers` entry with explicit read/mutate
   classifications, bounded response settings, and `GRY_CACHE_DIR`/`GRY_DB`

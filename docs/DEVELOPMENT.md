@@ -15,7 +15,7 @@ crates/
   gry-cli/     the `gry` binary and its commands
 docs/          architecture, capabilities, benchmarks, this guide
 tests/         differential fixture and helper scripts
-scripts/       benchmark helper
+scripts/       benchmark and one-line installer helpers
 third_party/   Nomic vectors, license and attribution
 ```
 
@@ -144,10 +144,23 @@ The check is skipped with a clear message when the reference binary is not insta
 3. Confirm `docs/CAPABILITIES.md` still matches the implementation and that every known limit is
    listed.
 4. Build with `cargo build --release --bin gry` and record the binary size.
-5. Tag the release and attach the binary plus checksums.
+5. Tag the release (`git tag v1.0.0 && git push origin v1.0.0`). The
+   [release workflow](../.github/workflows/release.yml) builds and attaches:
 
-`gry update` is intentionally not implemented: installs are managed by the package manager or by
-rebuilding from source.
+   - `gry-aarch64-apple-darwin.tar.gz`
+   - `gry-x86_64-apple-darwin.tar.gz`
+   - `gry-x86_64-unknown-linux-gnu.tar.gz`
+   - `gry-aarch64-unknown-linux-gnu.tar.gz`
+   - `gry-x86_64-unknown-linux-musl.tar.gz`
+   - `gry-aarch64-unknown-linux-musl.tar.gz`
+   - `SHA256SUMS` and `install.sh`
+
+   The attached `install.sh` is served at
+   `https://github.com/PizenLabs/gry/releases/latest/download/install.sh` and is the
+   canonical one-line install link.
+
+`gry update` is intentionally not implemented: installs are managed by the installer, package
+manager, or by rebuilding from source.
 
 ## Documentation conventions
 

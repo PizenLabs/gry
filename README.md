@@ -74,12 +74,41 @@ database.
 
 ## Installation
 
+### One-line install
+
+```bash
+curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash
+```
+
+The installer detects macOS or Linux and the machine architecture (including Rosetta),
+downloads the matching prebuilt binary, verifies its SHA-256, installs it into
+`~/.local/bin`, and configures the MCP server for the agent harnesses it detects
+(Claude Code, Claude Desktop, Cursor, Codex, OpenCode, Gemini CLI,
+VS Code/Cline/Roo/Kilo, Zed, Windsurf, and others). It falls back to a Cargo
+source build when no release asset matches.
+
+```bash
+# Configure specific harnesses instead of auto-detection.
+curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash -s -- --client claude,opencode
+
+# Pin a release and install directory.
+curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash -s -- --version v1.0.0 --prefix "$HOME/bin"
+
+# Install the binary without touching MCP configuration.
+curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash -s -- --no-mcp
+
+# Remove gry, its MCP entries, and the PATH block.
+curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash -s -- --uninstall
+```
+
+`--client auto` is the default; `gry install --list-clients` prints every id. The
+installer also installs the gry agent skill and adds the install directory to your
+shell PATH when needed (`--no-skill` and `--no-modify-path` opt out).
+
 ### Requirements
 
-- Rust 1.85+ and Cargo
+- Rust 1.85+ and Cargo (source builds only)
 - A C toolchain (tree-sitter grammars and bundled SQLite are compiled by Cargo)
-
-The first build downloads crates; the resulting binary has no network dependency at runtime.
 
 ### From source
 
@@ -102,8 +131,8 @@ Or install it into `~/.local/bin` with the Makefile:
 make install
 ```
 
-Prebuilt binaries are not published yet. Use the source build above and verify it with
-`gry doctor`.
+Prebuilt binaries for macOS (arm64/x86_64) and Linux (glibc/musl, x86_64/aarch64)
+are published with each release. Verify any install with `gry doctor`.
 
 ## Quick start
 
@@ -163,7 +192,10 @@ gry cli index_repository --repo-path /path/to/repo --mode full
 Or let gry edit a client configuration safely (backup and atomic write; `--dry-run` supported):
 
 ```bash
+gry install --client auto      # detect harnesses on this machine
+gry install --client all       # configure every supported harness
 gry install --client claude
+gry install --client claude-desktop
 gry install --client cursor
 gry install --client opencode
 gry install --client ohgo
@@ -175,14 +207,20 @@ gry install --client windsurf
 gry install --client roo
 gry install --client qwen
 gry install --list-clients
+gry uninstall --client auto
 gry uninstall --client claude
 ```
 
-Sixteen tested JSON/TOML adapters are covered (Claude, Cursor, Windsurf, Gemini, OpenCode, OHGO,
-Codex, Zed, Cline, Roo, Kilo, VS Code, Trae, Qwen, Augment, and Amp). The OHGO adapter writes its
-`mcp.servers` entry with explicit read/mutate classifications. Unknown JSON is preserved; files that
-are not valid JSON are refused rather than overwritten. Other clients can be configured with
-`--config`.
+`--client auto` checks existing configuration files, harness home directories, applications, and
+`PATH` executables, then configures only what it finds. It is what the one-line installer uses.
+
+Seventeen tested JSON/TOML adapters are covered (Claude Code, Claude Desktop, Cursor, Windsurf,
+Gemini, OpenCode, OHGO, Codex, Zed, Cline, Roo, Kilo, VS Code, Trae, Qwen, Augment, and Amp). Paths
+follow the platform: VS Code and its extensions use `~/Library/Application Support/Code/User` on
+macOS and `~/.config/Code/User` on Linux; Claude Desktop uses its platform app config. The OHGO
+adapter writes its `mcp.servers` entry with explicit read/mutate classifications. Unknown JSON is
+preserved; files that are not valid JSON are refused rather than overwritten. Other clients can be
+configured with `--config`.
 
 ## What it indexes
 

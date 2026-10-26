@@ -145,7 +145,7 @@ fn all_seventeen_tools_succeed() {
         "query_graph",
         json!({"project":"repo","query":"MATCH (a)-[:CALLS]->(b) RETURN a.name,b.name"}),
     );
-    assert!(query["rows"].as_array().unwrap().len() >= 1);
+    assert!(!query["rows"].as_array().unwrap().is_empty());
     let trace = call(
         &mut srv,
         "trace_path",
@@ -191,7 +191,7 @@ fn all_seventeen_tools_succeed() {
         "search_code",
         json!({"project":"repo","pattern":"Parser","mode":"compact"}),
     );
-    assert!(code["results"].as_array().unwrap().len() >= 1);
+    assert!(!code["results"].as_array().unwrap().is_empty());
 
     // Worktree change for detect_changes.
     write(&root, "src/parser.rs", "pub struct Parser;\nimpl Parser {\n pub fn new() -> Self { Parser }\n pub fn run(&self, input: &str) -> usize { input.len() + 1 }\n}\n");

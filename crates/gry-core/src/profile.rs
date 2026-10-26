@@ -55,16 +55,17 @@ impl AstProfile {
         // Recovering exact integer counters from the normalized vector is not
         // possible; keep the vector as the canonical representation by mapping
         // it back to approximate counts.
-        let mut out = AstProfile::default();
-        out.if_count = (nums[0] * 100.0).round() as u32;
-        out.for_count = (nums[1] * 100.0).round() as u32;
-        out.while_count = (nums[2] * 100.0).round() as u32;
-        out.switch_count = (nums[3] * 100.0).round() as u32;
-        out.try_count = (nums[4] * 100.0).round() as u32;
-        out.return_count = (nums[5] * 100.0).round() as u32;
-        out.max_nesting_depth = (nums[6] * 20.0).round() as u32;
-        out.avg_nesting_depth_x10 = (nums[7] * 100.0).round() as u32;
-        Some(out)
+        Some(AstProfile {
+            if_count: (nums[0] * 100.0).round() as u32,
+            for_count: (nums[1] * 100.0).round() as u32,
+            while_count: (nums[2] * 100.0).round() as u32,
+            switch_count: (nums[3] * 100.0).round() as u32,
+            try_count: (nums[4] * 100.0).round() as u32,
+            return_count: (nums[5] * 100.0).round() as u32,
+            max_nesting_depth: (nums[6] * 20.0).round() as u32,
+            avg_nesting_depth_x10: (nums[7] * 100.0).round() as u32,
+            ..Default::default()
+        })
     }
 
     /// Normalized vector for cosine similarity. Counts are log-scaled and

@@ -377,6 +377,10 @@ fn compose_target(value: &str, services: &serde_json::Map<String, Value>) -> Opt
 
 // ── Kubernetes / Helm ───────────────────────────────────────────────
 
+/// Workload candidate for service-selector matching:
+/// `(qualified_name, kind, selector_labels, pod_labels)`.
+type K8sResource = (String, String, Vec<(String, String)>, Vec<(String, String)>);
+
 fn parse_kubernetes(rel_path: &str, source: &[u8], out: &mut FileExtract, ecosystem: Option<&str>) {
     let text = String::from_utf8_lossy(source);
     let mut docs = Vec::new();
@@ -397,8 +401,7 @@ fn parse_kubernetes(rel_path: &str, source: &[u8], out: &mut FileExtract, ecosys
     if docs.is_empty() {
         docs.push(text.to_string());
     }
-    let mut resources: Vec<(String, String, Vec<(String, String)>, Vec<(String, String)>)> =
-        Vec::new();
+    let mut resources: Vec<K8sResource> = Vec::new();
     for doc in docs {
         let value: Value = match serde_yaml::from_str(&doc) {
             Ok(v) => v,
@@ -971,6 +974,12 @@ fn parse_ci(rel_path: &str, source: &[u8], out: &mut FileExtract) {
 static MAKE_TARGET: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^([A-Za-z0-9_][A-Za-z0-9_.\-/]*)\s*:").unwrap());
 
+/// Shell globs are not file paths. `go test ./...` must not become a
+/// reference to a file literally named `...`.
+fn is_glob_token(token: &str) -> bool {
+    token.contains("...") || token.contains('*') || token.contains('?') || token.contains('[')
+}
+
 fn parse_makefile(rel_path: &str, source: &[u8], out: &mut FileExtract) {
     let text = String::from_utf8_lossy(source);
     let mut current: Option<(String, i32)> = None;
@@ -1033,6 +1042,10 @@ fn record_command(
     let mut i = 0;
     while i < tokens.len() {
         let token = tokens[i];
+        if is_glob_token(token) {
+            i += 1;
+            continue;
+        }
         if matches!(token, "kubectl" | "helm" | "kustomize" | "terraform") {
             if let Some((flag, value)) =
                 find_flag(&tokens[i..], &["-f", "--filename", "-k", "--kustomize"])
@@ -1104,6 +1117,10 @@ fn record_command(
             } else {
                 token
             };
+            if is_glob_token(program) {
+                i += 1;
+                continue;
+            }
             if program.starts_with("./") || program.ends_with(".sh") {
                 add_edge(
                     out,
@@ -1656,6 +1673,20 @@ mod tests {
             .iter()
             .any(|n| n.name == "build" && n.label == "Function"));
         assert!(!out.infra_nodes.iter().any(|n| n.name == "CC"));
+    }
+
+    #[test]
+    fn make_globs_are_not_file_references() {
+        let out = infra("Makefile", "test:\n\tgo test ./...\n");
+        assert!(
+            !out.infra_edges
+                .iter()
+                .any(|edge| edge.target_qn.contains("@file:...")),
+            "go test ./... produced a file reference: {:?}",
+            out.infra_edges
+        );
+        assert!(!out.infra_nodes.iter().any(|node| node.name == "..."));
+        assert!(!out.infra_nodes.iter().any(|node| node.name == "./..."));
     }
 
     #[test]

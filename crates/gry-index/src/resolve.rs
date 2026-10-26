@@ -132,7 +132,7 @@ impl Registry {
                     registry
                         .package_roots
                         .entry(package.name.clone())
-                        .or_insert_with(|| String::new());
+                        .or_default();
                 }
             }
             if let Some(adr) = &extract.adr {
@@ -283,6 +283,27 @@ impl Registry {
                         external: false,
                     };
                 }
+                // Go packages are directories, not file stems. Resolve a
+                // module-path package (module/internal/database) to the unique
+                // module whose files live under that directory.
+                if !stem.is_empty() {
+                    let prefix = format!("{stem}/");
+                    let mut matches: Vec<&String> = self
+                        .module_by_stem
+                        .iter()
+                        .filter(|(key, _)| key.starts_with(&prefix))
+                        .map(|(_, value)| value)
+                        .collect();
+                    matches.sort();
+                    matches.dedup();
+                    if matches.len() == 1 {
+                        return ImportBinding {
+                            target_module: Some(matches[0].clone()),
+                            target_package: None,
+                            external: false,
+                        };
+                    }
+                }
             }
         }
         // Python dotted module.
@@ -348,6 +369,18 @@ impl Registry {
             caller_scope.last().cloned()
         };
         let imports = self.imports_for(caller_file);
+        // A receiver bound to an external package cannot name a local symbol.
+        // Without this guard a unique local short name (database.New) absorbs
+        // calls through an external package (cors.New).
+        if let Some(receiver) = call.receiver.as_deref().or(call.receiver_type.as_deref()) {
+            if imports
+                .and_then(|map| map.get(receiver.trim()))
+                .map(|binding| binding.external)
+                .unwrap_or(false)
+            {
+                return None;
+            }
+        }
         let mut scored: Vec<(usize, f64, &'static str)> = Vec::new();
         for &idx in indices {
             let cand = &self.symbols[idx];
@@ -646,7 +679,7 @@ pub fn import_edge_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gry_parse::model::FileExtract;
+    use gry_parse::model::{FileExtract, PackageInfo};
 
     fn symbol(
         qn: &str,
@@ -695,6 +728,101 @@ mod tests {
         // No import target resolution because module_by_stem is not seeded for
         // the synthetic file; same-module/unique still picks a winner.
         assert!(resolved.confidence >= 0.45);
+    }
+
+    #[test]
+    fn go_module_internal_import_is_not_external() {
+        let gomod = FileExtract {
+            package: Some(PackageInfo {
+                name: "go-template".to_string(),
+                ecosystem: "go".to_string(),
+                dependencies: vec![],
+                version: None,
+            }),
+            ..Default::default()
+        };
+        let database = FileExtract {
+            package: Some(PackageInfo {
+                name: "database".to_string(),
+                ecosystem: "go".to_string(),
+                dependencies: vec![],
+                version: None,
+            }),
+            ..Default::default()
+        };
+        let mut routes = FileExtract::default();
+        routes.imports.push(Import {
+            specifier: "go-template/internal/database".to_string(),
+            local_name: Some("database".to_string()),
+            ..Default::default()
+        });
+        let files = vec![
+            (gomod, "go.mod".to_string(), false),
+            (database, "internal/database/database.go".to_string(), true),
+            (routes, "internal/server/routes.go".to_string(), true),
+        ];
+        let mut new = symbol(
+            "p.internal.database.New",
+            "New",
+            "Function",
+            "internal/database/database.go",
+            "p.internal.database",
+            &[],
+        );
+        new.language = "go".to_string();
+        let registry = Registry::build("p", &files, vec![new]);
+        let binding = registry
+            .imports_for("internal/server/routes.go")
+            .and_then(|imports| imports.get("database"))
+            .expect("database import binding");
+        assert!(
+            !binding.external,
+            "module-internal import was marked external"
+        );
+        assert_eq!(
+            binding.target_module.as_deref(),
+            Some("p.internal.database")
+        );
+    }
+
+    #[test]
+    fn external_receiver_does_not_absorb_unique_local_name() {
+        let mut new = symbol(
+            "p.database.New",
+            "New",
+            "Function",
+            "internal/database/database.go",
+            "p.database",
+            &[],
+        );
+        new.language = "go".to_string();
+        let symbols = vec![new];
+        let mut extract = FileExtract::default();
+        extract.imports.push(Import {
+            specifier: "github.com/gin-contrib/cors".to_string(),
+            local_name: Some("cors".to_string()),
+            ..Default::default()
+        });
+        let files = vec![(extract, "internal/server/routes.go".to_string(), false)];
+        let registry = Registry::build("p", &files, symbols);
+        let call = CallSite {
+            name: "New".to_string(),
+            receiver: Some("cors".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            registry
+                .resolve_call(
+                    "p",
+                    "internal/server/routes.go",
+                    "p.server",
+                    &[],
+                    "go",
+                    &call
+                )
+                .is_none(),
+            "cors.New must not resolve to database.New"
+        );
     }
 
     #[test]

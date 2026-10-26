@@ -327,13 +327,9 @@ impl Parser {
                     self.expect_keyword("BY")?;
                     loop {
                         let expr = self.parse_expr()?;
-                        let asc = if self.eat_keyword("ASC") || self.eat_keyword("ASCENDING") {
-                            true
-                        } else if self.eat_keyword("DESC") || self.eat_keyword("DESCENDING") {
-                            false
-                        } else {
-                            true
-                        };
+                        let asc = self.eat_keyword("ASC")
+                            || self.eat_keyword("ASCENDING")
+                            || !(self.eat_keyword("DESC") || self.eat_keyword("DESCENDING"));
                         order.push((expr, asc));
                         if !self.eat_punct(',') {
                             break;
@@ -861,6 +857,8 @@ impl Graph {
 }
 
 type Binding = HashMap<String, Value>;
+type ExecRows = Vec<(Vec<Value>, Binding)>;
+type ExecResult = gry_core::GryResult<(Vec<String>, ExecRows)>;
 
 fn node_value(node: &Node) -> Value {
     let mut map = Map::new();
@@ -1013,7 +1011,7 @@ pub fn query_graph(store: &Store, req: &QueryRequest) -> gry_core::GryResult<Val
     } else {
         req.offset
     };
-    let max_rows = req.max_rows.max(1).min(99_998);
+    let max_rows = req.max_rows.clamp(1, 99_998);
     let graph = Graph::load(store, &req.project)?;
     let parts = split_union(&req.query)?;
     let mut all_rows: Vec<(Vec<Value>, Binding)> = Vec::new();
@@ -1023,11 +1021,11 @@ pub fn query_graph(store: &Store, req: &QueryRequest) -> gry_core::GryResult<Val
         if idx > 0 {
             union_all = part.all;
         }
-        let toks = tokenize(&part.query).map_err(|e| gry_core::GryError::unsupported(e))?;
+        let toks = tokenize(&part.query).map_err(gry_core::GryError::unsupported)?;
         let mut parser = Parser::new(toks);
         let query = parser
             .parse_query()
-            .map_err(|e| gry_core::GryError::unsupported(e))?;
+            .map_err(gry_core::GryError::unsupported)?;
         if parser.pos < parser.toks.len() {
             return Err(gry_core::GryError::unsupported(format!(
                 "unsupported trailing tokens near {:?}",
@@ -1227,10 +1225,7 @@ fn decode_cursor(cursor: &str) -> gry_core::GryResult<(String, String, usize)> {
     Ok((generation.to_string(), query.to_string(), offset))
 }
 
-fn execute(
-    graph: &Graph,
-    query: &Query,
-) -> gry_core::GryResult<(Vec<String>, Vec<(Vec<Value>, Binding)>)> {
+fn execute(graph: &Graph, query: &Query) -> ExecResult {
     let mut rows: Vec<Binding> = vec![HashMap::new()];
     let mut columns = Vec::new();
     let mut final_rows: Vec<(Vec<Value>, Binding)> = Vec::new();
@@ -1344,7 +1339,7 @@ fn project_rows(
     items: &[ReturnItem],
     distinct: bool,
     graph: &Graph,
-) -> gry_core::GryResult<(Vec<String>, Vec<(Vec<Value>, Binding)>)> {
+) -> ExecResult {
     let star = items.len() == 1 && matches!(items[0].expr, Expr::Star);
     if star {
         let mut columns: Vec<String> = Vec::new();
@@ -1850,7 +1845,7 @@ fn eval_func(
         // Aggregates outside a grouping context operate on one row.
         return eval_aggregate(
             &Expr::Func(name.to_string(), args.to_vec(), distinct),
-            &[binding.clone()],
+            std::slice::from_ref(binding),
             graph,
         );
     }

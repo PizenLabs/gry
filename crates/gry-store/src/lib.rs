@@ -384,6 +384,30 @@ impl Store {
         Ok((nodes, edges))
     }
 
+    /// Remove nodes whose file is no longer in the project's current file set.
+    /// Returns the number of orphan file paths cleaned.
+    pub fn prune_orphan_nodes(&mut self, project: &str) -> StoreResult<usize> {
+        let tx = self.conn.transaction()?;
+        let pruned = delete_orphan_nodes(&tx, project)?;
+        // Global nodes (EnvVar, Package, Process, ...) have an empty
+        // file_path, so the file-level reconcile cannot see them. Remove the
+        // ones left with no edge at all.
+        let orphan_globals = "project=?1 AND label IN
+             ('Package','EnvVar','Channel','Process','Image','Resource','Chart')
+             AND id NOT IN (SELECT source_id FROM edges WHERE project=?1)
+             AND id NOT IN (SELECT target_id FROM edges WHERE project=?1)";
+        if self.fts_delete {
+            let sql = format!("DELETE FROM nodes_fts WHERE rowid IN (SELECT id FROM nodes WHERE {orphan_globals})");
+            tx.execute(&sql, [project])?;
+        }
+        tx.execute(
+            &format!("DELETE FROM nodes WHERE {orphan_globals}"),
+            [project],
+        )?;
+        tx.commit()?;
+        Ok(pruned)
+    }
+
     pub fn label_counts(&self, project: &str) -> StoreResult<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT label, COUNT(*) FROM nodes WHERE project=?1
@@ -511,6 +535,13 @@ impl Store {
             }
         }
 
+        if !write.replace_nodes {
+            // file_hashes now describes the current file set. Any node whose
+            // file is no longer present is stale: the file was deleted, newly
+            // ignored, or left behind by an older generation. Reconcile before
+            // inserting the new nodes so a full re-index actually shrinks.
+            delete_orphan_nodes(&tx, write.project)?;
+        }
         if !write.replace_nodes && self.fts_delete {
             delete_fts_for_files(&tx, write.project, write.affected_files)?;
         }
@@ -755,6 +786,7 @@ impl Store {
                 &branch_qns,
                 structural_change,
                 write.gc_globals,
+                self.fts_delete,
             )?;
             phase!("gc");
             if !write.nodes_only {
@@ -1552,6 +1584,38 @@ fn delete_fts_for_files(tx: &Transaction<'_>, project: &str, files: &[String]) -
     Ok(())
 }
 
+/// Delete nodes whose file is no longer in the project's current file set.
+/// `file_hashes` must already contain the new set. Edges and vectors cascade
+/// from the node rows; FTS is contentless and must be deleted explicitly.
+fn delete_orphan_nodes(tx: &Transaction<'_>, project: &str) -> StoreResult<usize> {
+    let orphans: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT DISTINCT file_path FROM nodes
+             WHERE project=?1 AND file_path<>''
+               AND file_path NOT IN (SELECT rel_path FROM file_hashes WHERE project=?1)",
+        )?;
+        let rows = stmt.query_map([project], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if orphans.is_empty() {
+        return Ok(0);
+    }
+    delete_fts_for_files(tx, project, &orphans)?;
+    for chunk in orphans.chunks(400) {
+        let ph = placeholders(chunk.len());
+        let sql = format!("DELETE FROM nodes WHERE project=? AND file_path IN ({ph})");
+        let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+        values.push(&project);
+        for file in chunk {
+            values.push(file);
+        }
+        tx.execute(&sql, values.as_slice())?;
+    }
+    let refs: Vec<&str> = orphans.iter().map(String::as_str).collect();
+    delete_file_rows(tx, project, &refs)?;
+    Ok(orphans.len())
+}
+
 fn delete_file_rows(tx: &Transaction<'_>, project: &str, files: &[&str]) -> StoreResult<()> {
     for chunk in files.chunks(400) {
         if chunk.is_empty() {
@@ -1660,6 +1724,7 @@ fn gc_delta(
     branch_qns: &[String],
     structural_change: bool,
     gc_globals: bool,
+    fts_delete: bool,
 ) -> StoreResult<()> {
     // Branch nodes are a projection of the current checkout; stale branches
     // must not survive an update.
@@ -1684,11 +1749,18 @@ fn gc_delta(
     }
     // Global infrastructure nodes with no remaining edge are orphans.
     if gc_globals {
+        let orphan_globals = "project=?1 AND label IN
+             ('Package','EnvVar','Channel','Process','Image','Resource','Chart')
+             AND id NOT IN (SELECT source_id FROM edges WHERE project=?1)
+             AND id NOT IN (SELECT target_id FROM edges WHERE project=?1)";
+        if fts_delete {
+            let sql = format!(
+                "DELETE FROM nodes_fts WHERE rowid IN (SELECT id FROM nodes WHERE {orphan_globals})"
+            );
+            tx.execute(&sql, [project])?;
+        }
         tx.execute(
-            "DELETE FROM nodes WHERE project=?1 AND label IN
-         ('Package','EnvVar','Channel','Process','Image','Resource','Chart')
-         AND id NOT IN (SELECT source_id FROM edges WHERE project=?1)
-         AND id NOT IN (SELECT target_id FROM edges WHERE project=?1)",
+            &format!("DELETE FROM nodes WHERE {orphan_globals}"),
             [project],
         )?;
     }
@@ -1853,4 +1925,43 @@ pub fn edge_identity(edge: &Edge, nodes: &HashMap<i64, &Node>) -> String {
         edge.edge_type,
         edge.local_name().unwrap_or("")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::test_store;
+
+    #[test]
+    fn delta_publish_removes_nodes_for_files_no_longer_present() {
+        let mut store = test_store();
+        let files = vec![FileHash {
+            rel_path: "src/main.rs".into(),
+            sha256: "a2".into(),
+            mtime_ns: 2,
+            size: 20,
+        }];
+        let deleted = vec!["src/lib.rs".to_string(), "tests/test_main.rs".to_string()];
+        let mut write = ProjectWrite::new("p", "/tmp/p", "full", "gen-2");
+        write.files = &files;
+        write.replace_nodes = false;
+        write.deleted_files = &deleted;
+        store.publish(&write).unwrap();
+
+        assert!(
+            store.nodes_by_file("p", "src/lib.rs").unwrap().is_empty(),
+            "deleted file kept its nodes"
+        );
+        assert!(
+            store
+                .nodes_by_file("p", "tests/test_main.rs")
+                .unwrap()
+                .is_empty(),
+            "deleted test file kept its nodes"
+        );
+        assert!(
+            !store.nodes_by_file("p", "src/main.rs").unwrap().is_empty(),
+            "surviving file lost its nodes"
+        );
+    }
 }

@@ -483,7 +483,10 @@ fn architecture_tool(
         expected_generation: s(args, "expected_generation"),
     };
     let value = get_architecture(&store, &req)?;
-    Ok((value, format(args), max_tokens(args, 3200)))
+    // Architecture reports are naturally larger than symbol queries, and the
+    // default aspect set already exceeds the 3200-token budget on mid-sized
+    // repositories. Keep a workable default and let callers raise it.
+    Ok((value, format(args), max_tokens(args, 8000)))
 }
 
 fn search_code_tool(

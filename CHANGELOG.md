@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- OMP (`omp`) as an install target. `gry install --client omp` and `--client auto`
+  write `~/.omp/agent/mcp.json`, `--client all` includes it, and the agent skill
+  is installed to `~/.omp/agent/skills/gry/SKILL.md` when OMP is present.
+
 ## 1.0.2 — 2026-10-26
 
 ### Fixed

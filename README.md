@@ -210,6 +210,7 @@ gry install --client claude
 gry install --client claude-desktop
 gry install --client cursor
 gry install --client opencode
+gry install --client omp
 gry install --client ohgo
 gry install --client codex
 gry install --client zed
@@ -226,8 +227,9 @@ gry uninstall --client claude
 `--client auto` checks existing configuration files, harness home directories, applications, and
 `PATH` executables, then configures only what it finds. It is what the one-line installer uses.
 
-Seventeen tested JSON/TOML adapters are covered (Claude Code, Claude Desktop, Cursor, Windsurf,
-Gemini, OpenCode, OHGO, Codex, Zed, Cline, Roo, Kilo, VS Code, Trae, Qwen, Augment, and Amp). Paths
+Eighteen tested JSON/TOML adapters are covered (Claude Code, Claude Desktop, Cursor,
+Windsurf, Gemini, OpenCode, OMP, OHGO, Codex, Zed, Cline, Roo, Kilo, VS Code, Trae,
+Qwen, Augment, and Amp). Paths
 follow the platform: VS Code and its extensions use `~/Library/Application Support/Code/User` on
 macOS and `~/.config/Code/User` on Linux; Claude Desktop uses its platform app config. The OHGO
 adapter writes its `mcp.servers` entry with explicit read/mutate classifications. Unknown JSON is

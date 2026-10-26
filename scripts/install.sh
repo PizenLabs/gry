@@ -116,7 +116,7 @@ Examples:
   curl -fsSL .../install.sh | bash -s -- --version v1.0.0 --prefix ~/bin
   curl -fsSL .../install.sh | bash -s -- --uninstall
 
-Detected clients: claude, claude-desktop, cursor, windsurf, gemini, opencode,
+Detected clients: claude, claude-desktop, cursor, windsurf, gemini, opencode, omp,
 ohgo, codex, zed, cline, roo, kilo, vscode, trae, qwen, augment, amp.
 EOF
 }

@@ -1295,6 +1295,7 @@ const SUPPORTED_CLIENTS: &[(&str, &str)] = &[
     ("windsurf", "Windsurf (~/.codeium/windsurf/mcp_config.json)"),
     ("gemini", "Gemini CLI (~/.gemini/settings.json)"),
     ("opencode", "OpenCode (~/.config/opencode/opencode.json)"),
+    ("omp", "OMP (~/.omp/agent/mcp.json)"),
     ("ohgo", "OHGO (~/.ohgo/settings.json)"),
     ("codex", "Codex CLI (~/.codex/config.toml)"),
     ("zed", "Zed (~/.config/zed/settings.json)"),
@@ -1437,6 +1438,16 @@ fn configure_client(
         "args": ["serve"],
     });
     match client {
+        "omp" => {
+            if !root["mcpServers"].is_object() {
+                root["mcpServers"] = json!({});
+            }
+            root["mcpServers"]["gry"] = json!({
+                "type": "stdio",
+                "command": exe,
+                "args": ["serve"]
+            });
+        }
         "ohgo" => {
             if !root["mcp"].is_object() {
                 root["mcp"] = json!({});
@@ -1569,6 +1580,7 @@ fn client_detected(client: &str) -> bool {
         }
         "gemini" => home.join(".gemini").is_dir() || command_exists("gemini"),
         "opencode" => home.join(".config/opencode").is_dir() || command_exists("opencode"),
+        "omp" => home.join(".omp/agent").is_dir() || command_exists("omp"),
         "ohgo" => home.join(".ohgo").is_dir() || command_exists("ohgo"),
         "codex" => home.join(".codex").is_dir() || command_exists("codex"),
         "zed" => {
@@ -1806,6 +1818,10 @@ ambiguous or unresolved, say so rather than guessing.
         if opencode_home.is_dir() || opencode_home.join("opencode.json").exists() {
             targets.push(opencode_home.join("skills/gry/SKILL.md"));
         }
+        let omp_home = home_dir().join(".omp/agent");
+        if omp_home.is_dir() || omp_home.join("mcp.json").exists() {
+            targets.push(omp_home.join("skills/gry/SKILL.md"));
+        }
         for path in &targets {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -1832,6 +1848,7 @@ fn client_config_path(client: &str) -> PathBuf {
         "windsurf" => home.join(".codeium/windsurf/mcp_config.json"),
         "gemini" => home.join(".gemini/settings.json"),
         "opencode" => home.join(".config/opencode/opencode.json"),
+        "omp" => home.join(".omp/agent/mcp.json"),
         "ohgo" => home.join(".ohgo/settings.json"),
         "codex" => home.join(".codex/config.toml"),
         "zed" => home.join(".config/zed/settings.json"),

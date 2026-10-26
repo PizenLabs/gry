@@ -251,6 +251,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "path":{"type":"string","description":"Directory prefix."},
                     "aspects":{"type":"array","items":{"type":"string","enum":["all","overview","structure","dependencies","routes","languages","packages","entry_points","hotspots","boundaries","layers","file_tree","clusters","cycles","system_structure"]}},
                     "expected_generation":{"type":"string","minLength":1},
+                    "max_output_tokens":{"type":"integer","default":8000,"minimum":128,"maximum":1000000},
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"}
                 },
                 "required":["project"]

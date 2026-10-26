@@ -21,6 +21,9 @@ static FIELD_LINE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)^\s*[-*]?\s*(status|date|deciders?|decision-makers?)\s*[:\-]\s*(.+?)\s*$")
         .unwrap()
 });
+static PDF_TJ_STRING: Lazy<Regex> = Lazy::new(|| Regex::new(r"\((?:\\.|[^\\)])*\)\s*Tj").unwrap());
+static PDF_TJ_ARRAY: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[(.*?)\]\s*TJ").unwrap());
+static PDF_STRING: Lazy<Regex> = Lazy::new(|| Regex::new(r"\((?:\\.|[^\\)])*\)").unwrap());
 
 pub fn parse_markdown(rel_path: &str, source: &[u8], out: &mut FileExtract) {
     let text = String::from_utf8_lossy(source);
@@ -300,10 +303,7 @@ pub fn parse_pdf(rel_path: &str, source: &[u8], out: &mut FileExtract) {
     }
     let lossy = String::from_utf8_lossy(source);
     let mut chunks = Vec::new();
-    for cap in Regex::new(r"\((?:\\.|[^\\)])*\)\s*Tj")
-        .unwrap()
-        .captures_iter(&lossy)
-    {
+    for cap in PDF_TJ_STRING.captures_iter(&lossy) {
         if let Some(m) = cap.get(0) {
             let raw = m.as_str();
             if let Some(start) = raw.find('(') {
@@ -313,12 +313,9 @@ pub fn parse_pdf(rel_path: &str, source: &[u8], out: &mut FileExtract) {
             }
         }
     }
-    for cap in Regex::new(r"\[(.*?)\]\s*TJ").unwrap().captures_iter(&lossy) {
+    for cap in PDF_TJ_ARRAY.captures_iter(&lossy) {
         if let Some(inner) = cap.get(1) {
-            for part in Regex::new(r"\((?:\\.|[^\\)])*\)")
-                .unwrap()
-                .captures_iter(inner.as_str())
-            {
+            for part in PDF_STRING.captures_iter(inner.as_str()) {
                 if let Some(m) = part.get(0) {
                     chunks.push(unescape_pdf(&m.as_str()[1..m.as_str().len() - 1]));
                 }

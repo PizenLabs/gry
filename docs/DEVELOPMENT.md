@@ -216,6 +216,16 @@ workspace version, then publishes all crates after the GitHub release assets are
 Note that crates.io does not allow wildcard (`*`) dependency requirements, which is why the
 tree-sitter grammars in `gry-parse` are pinned to resolved versions.
 
+If crates.io accepts an upload but the version never appears in the registry index
+(`https://index.crates.io/<ab>/<cd>/<crate>`), dependent crates fail with `no matching package
+named ...` or `failed to select a version`. Compare the latest commit time of
+[`rust-lang/crates.io-index`](https://github.com/rust-lang/crates.io-index/commits/master); if it
+is many minutes old, the index is stalled on crates.io's side, regardless of what
+`https://status.crates.io` reports. `scripts/publish.sh` treats "uploaded but not indexed" as a
+blocker rather than a success, and `verify_index` fails the run with the missing crate names. Wait
+for the index to resume and rerun the same command: versions already accepted by the API are
+skipped while missing index entries are waited on, so nothing needs to be republished.
+
 ## Documentation conventions
 
 - [README.md](../README.md) is the product front door: what gry is, install, quick start, MCP setup.

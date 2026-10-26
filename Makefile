@@ -17,7 +17,7 @@ PKG_VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 
 .PHONY: help all build build-debug release \
 	check fmt fmt-check clippy lint test test-unit test-integration test-doc \
 	doc doc-open run install uninstall bench differential smoke verify \
-	version clean clean-target dist dist-clean
+	package publish-dry-run publish version clean clean-target dist dist-clean
 
 ## help: list available targets
 help:
@@ -122,6 +122,19 @@ differential: release
 ## verify: full pre-release verification checklist
 verify: fmt-check test build smoke
 	@echo "verify: PASS"
+
+## package: check that every crate packages cleanly for crates.io
+package:
+	$(CARGO) package --workspace --locked --no-verify
+
+## publish-dry-run: validate packaging for crates.io without uploading
+publish-dry-run: verify
+	DRY_RUN=1 bash scripts/publish.sh
+
+## publish: publish every crate to crates.io in dependency order (CONFIRM=yes)
+publish: verify package
+	@test "$(CONFIRM)" = "yes" || { echo "refusing to publish without CONFIRM=yes" >&2; exit 2; }
+	bash scripts/publish.sh
 
 ## version: print the workspace version and built binary version
 version:

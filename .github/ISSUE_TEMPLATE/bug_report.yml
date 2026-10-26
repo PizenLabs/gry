@@ -38,7 +38,7 @@ body:
     attributes:
       label: Installation method
       description: How did you install gry?
-      placeholder: cargo install --path crates/gry-cli / make install / prebuilt
+      placeholder: cargo install gry / cargo install --path crates/gry-cli / make install / prebuilt
     validations:
       required: true
 

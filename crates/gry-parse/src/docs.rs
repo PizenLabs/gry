@@ -703,7 +703,7 @@ mod tests {
 
     #[test]
     fn pdf_text_layer_is_extracted() {
-        let bytes = include_bytes!("../../../tests/fixtures/sample.pdf");
+        let bytes = include_bytes!("../tests/fixtures/sample.pdf");
         let mut out = FileExtract::default();
         parse_pdf("docs/sample.pdf", bytes, &mut out);
         assert!(!out.sections.is_empty(), "expected a text layer section");

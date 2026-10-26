@@ -1,8 +1,11 @@
 //! Bundled Nomic `nomic-embed-code` token vectors (Apache-2.0).
 //!
 //! 40,856 tokens × 768 int8 dimensions, unit-normalized and stored ×127.
-//! See `third_party/nomic/NOTICE`. gry uses these static token vectors rather
-//! than shipping the 7B model: no network, no inference runtime, deterministic.
+//! See `assets/nomic/NOTICE`. gry uses these static token vectors rather than
+//! shipping the 7B model: no network, no inference runtime, deterministic.
+//!
+//! The asset paths are crate-relative so the published package is
+//! self-contained; the repository copies are symlinks to `third_party/nomic`.
 
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -10,8 +13,8 @@ use std::collections::HashMap;
 pub const DIM: usize = 768;
 pub const SCALE: f32 = 127.0;
 
-const TOKENS_TEXT: &str = include_str!("../../../third_party/nomic/code_tokens.txt");
-const VECTOR_BYTES: &[u8] = include_bytes!("../../../third_party/nomic/code_vectors.bin");
+const TOKENS_TEXT: &str = include_str!("../assets/nomic/code_tokens.txt");
+const VECTOR_BYTES: &[u8] = include_bytes!("../assets/nomic/code_vectors.bin");
 
 struct Table {
     index: HashMap<&'static str, u32>,

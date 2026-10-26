@@ -216,6 +216,130 @@ fn install_dry_run_is_non_destructive() {
 }
 
 #[test]
+fn install_auto_detects_configured_harnesses() {
+    let home = tempfile::tempdir().unwrap();
+    fs::write(home.path().join(".claude.json"), "{}").unwrap();
+    fs::create_dir_all(home.path().join(".config/opencode")).unwrap();
+    fs::write(home.path().join(".config/opencode/opencode.json"), "{}").unwrap();
+
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .env("PATH", "/nonexistent")
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .args(["--json", "install", "--client", "auto"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["status"], "configured");
+    let configured: Vec<&str> = value["configured"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["client"].as_str())
+        .collect();
+    assert!(configured.contains(&"claude"), "{value}");
+    assert!(configured.contains(&"opencode"), "{value}");
+
+    let claude: Value =
+        serde_json::from_slice(&fs::read(home.path().join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(claude["mcpServers"]["gry"]["args"][0], "serve");
+    let opencode: Value = serde_json::from_slice(
+        &fs::read(home.path().join(".config/opencode/opencode.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(opencode["mcp"]["gry"]["command"][1], "serve");
+    assert!(!home.path().join(".codex/config.toml").exists());
+
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .env("PATH", "/nonexistent")
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .args(["--json", "uninstall", "--client", "auto"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let claude: Value =
+        serde_json::from_slice(&fs::read(home.path().join(".claude.json")).unwrap()).unwrap();
+    assert!(claude["mcpServers"].get("gry").is_none());
+    let opencode: Value = serde_json::from_slice(
+        &fs::read(home.path().join(".config/opencode/opencode.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(opencode["mcp"].get("gry").is_none());
+}
+
+#[test]
+fn install_skill_targets_detected_harnesses() {
+    let home = tempfile::tempdir().unwrap();
+    fs::write(home.path().join(".claude.json"), "{}").unwrap();
+    fs::create_dir_all(home.path().join(".config/opencode")).unwrap();
+    fs::write(home.path().join(".config/opencode/opencode.json"), "{}").unwrap();
+
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .env("PATH", "/nonexistent")
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .args(["--quiet", "install", "--client", "claude", "--skill"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(home.path().join(".claude/skills/gry/SKILL.md").exists());
+    assert!(home
+        .path()
+        .join(".config/opencode/skills/gry/SKILL.md")
+        .exists());
+    assert!(home.path().join(".config/gry/SKILL.md").exists());
+}
+
+#[test]
+fn install_all_configures_every_client() {
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .env("PATH", "/nonexistent")
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .args(["--json", "install", "--client", "all"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["status"], "configured");
+    assert_eq!(value["configured"].as_array().unwrap().len(), 17);
+    assert_eq!(value["failed"].as_array().unwrap().len(), 0);
+    assert!(home.path().join(".codex/config.toml").exists());
+    assert!(home.path().join(".cursor/mcp.json").exists());
+    if cfg!(target_os = "macos") {
+        assert!(home
+            .path()
+            .join("Library/Application Support/Code/User/mcp.json")
+            .exists());
+        assert!(home
+            .path()
+            .join("Library/Application Support/Claude/claude_desktop_config.json")
+            .exists());
+    } else {
+        assert!(home.path().join(".config/Code/User/mcp.json").exists());
+        assert!(home
+            .path()
+            .join(".config/Claude/claude_desktop_config.json")
+            .exists());
+    }
+}
+
+#[test]
 fn ohgo_install_preserves_settings_and_classifies_tools() {
     let home = tempfile::tempdir().unwrap();
     let settings = home.path().join(".ohgo/settings.json");

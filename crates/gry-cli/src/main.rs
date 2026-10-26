@@ -380,22 +380,27 @@ enum ConfigSub {
 
 #[derive(Args)]
 struct InstallCmd {
+    /// Client id, `auto` to configure every detected harness, or `all`.
     #[arg(long, default_value = "claude")]
     client: String,
     #[arg(long)]
     list_clients: bool,
+    /// Explicit config path (single client only).
     #[arg(long)]
     config: Option<PathBuf>,
     #[arg(long)]
     dry_run: bool,
+    /// Install the agent skill alongside the MCP entry.
     #[arg(long)]
     skill: bool,
 }
 
 #[derive(Args)]
 struct UninstallCmd {
+    /// Client id, `auto` for every detected harness, or `all`.
     #[arg(long, default_value = "claude")]
     client: String,
+    /// Explicit config path (single client only).
     #[arg(long)]
     config: Option<PathBuf>,
     #[arg(long)]
@@ -719,8 +724,8 @@ fn run(cli: &Cli, config: &Config) -> gry_core::GryResult<()> {
             print_value(&json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "status": "manual_update",
-                "message": "gry does not self-update. Rebuild from source or use your package manager.",
-                "command": "cargo install --path crates/gry-cli --force"
+                "message": "gry does not self-update. Re-run the installer or rebuild from source.",
+                "command": "curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash"
             }));
             Ok(())
         }
@@ -1284,7 +1289,8 @@ fn config_cmd(config: &Config, cmd: &ConfigCmd) -> gry_core::GryResult<()> {
 }
 
 const SUPPORTED_CLIENTS: &[(&str, &str)] = &[
-    ("claude", "Claude Desktop / Claude Code (~/.claude.json)"),
+    ("claude", "Claude Code (~/.claude.json)"),
+    ("claude-desktop", "Claude Desktop (platform app config)"),
     ("cursor", "Cursor (~/.cursor/mcp.json)"),
     ("windsurf", "Windsurf (~/.codeium/windsurf/mcp_config.json)"),
     ("gemini", "Gemini CLI (~/.gemini/settings.json)"),
@@ -1295,8 +1301,8 @@ const SUPPORTED_CLIENTS: &[(&str, &str)] = &[
     ("cline", "Cline (VS Code global storage)"),
     ("roo", "Roo Code (VS Code global storage)"),
     ("kilo", "Kilo Code (VS Code global storage)"),
-    ("vscode", "VS Code (~/.config/Code/User/mcp.json)"),
-    ("trae", "Trae (~/.config/Trae/User/mcp.json)"),
+    ("vscode", "VS Code (Code/User/mcp.json)"),
+    ("trae", "Trae (Trae/User/mcp.json)"),
     ("qwen", "Qwen Code (~/.qwen/settings.json)"),
     ("augment", "Augment (~/.augment/settings.json)"),
     ("amp", "Amp (~/.config/amp/settings.json)"),
@@ -1310,39 +1316,107 @@ fn install_cmd(config: &Config, cmd: &InstallCmd) -> gry_core::GryResult<()> {
         }
         return Ok(());
     }
-    if cmd.skill {
+    let multi = is_multi_client(&cmd.client);
+    if multi && cmd.config.is_some() {
+        return Err(gry_core::GryError::invalid(
+            "--config requires a single --client id",
+        ));
+    }
+    let clients = resolve_clients(&cmd.client)?;
+    if clients.is_empty() {
+        if cmd.skill && !cmd.dry_run {
+            skill_cmd(&SkillCmd { install: true })?;
+        }
+        let message =
+            "no supported agent harness detected; pass --client <id> (see --list-clients)";
+        if JSON_OUTPUT.load(Ordering::Relaxed) {
+            print_value(&json!({
+                "status": "none_detected",
+                "clients": [],
+                "message": message
+            }));
+        } else if !QUIET_OUTPUT.load(Ordering::Relaxed) {
+            eprintln!("gry: {message}");
+        }
+        return Ok(());
+    }
+    let exe = std::env::current_exe()?.to_string_lossy().to_string();
+    let mut configured = Vec::new();
+    let mut failed = Vec::new();
+    for client in &clients {
+        let path = cmd
+            .config
+            .clone()
+            .unwrap_or_else(|| client_config_path(client));
+        match configure_client(client, &exe, &path, cmd.dry_run) {
+            Ok(value) => configured.push(value),
+            Err(error) => failed.push(json!({"client": client, "error": error.to_string()})),
+        }
+    }
+    if cmd.skill && !cmd.dry_run {
         skill_cmd(&SkillCmd { install: true })?;
     }
-    let exe = std::env::current_exe()?;
-    let exe = exe.to_string_lossy().to_string();
-    let path = cmd
-        .config
-        .clone()
-        .unwrap_or_else(|| client_config_path(&cmd.client));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    if !multi {
+        if let Some(error) = failed.first() {
+            return Err(gry_core::GryError::invalid(
+                error["error"]
+                    .as_str()
+                    .unwrap_or("client configuration failed")
+                    .to_string(),
+            ));
+        }
+        if let Some(value) = configured.first() {
+            print_value(value);
+        }
+        return Ok(());
     }
-    let client = cmd.client.as_str();
+    let status = if failed.is_empty() {
+        "configured"
+    } else if configured.is_empty() {
+        "failed"
+    } else {
+        "partial"
+    };
+    print_value(&json!({
+        "status": status,
+        "detected": clients,
+        "configured": configured,
+        "failed": failed
+    }));
+    if !failed.is_empty() {
+        return Err(gry_core::GryError::invalid(format!(
+            "failed to configure {} client(s)",
+            failed.len()
+        )));
+    }
+    Ok(())
+}
+
+fn configure_client(
+    client: &str,
+    exe: &str,
+    path: &Path,
+    dry_run: bool,
+) -> gry_core::GryResult<Value> {
     if client == "codex" {
-        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
         let block = format!("\n[mcp_servers.gry]\ncommand = {exe:?}\nargs = [\"serve\"]\n");
         let updated = if existing.contains("[mcp_servers.gry]") {
             replace_toml_section(&existing, "mcp_servers.gry", block.trim_start())
         } else {
             format!("{existing}{block}")
         };
-        if cmd.dry_run {
-            print_value(
-                &json!({"client": client, "path": path, "dry_run": true, "content": updated}),
+        if dry_run {
+            return Ok(
+                json!({"client": client, "path": path, "dry_run": true, "content": updated}),
             );
-        } else {
-            backup(&path)?;
-            std::fs::write(&path, updated)?;
-            print_value(&json!({"client": client, "path": path, "status": "installed"}));
         }
-        return Ok(());
+        ensure_parent(path)?;
+        backup(path)?;
+        std::fs::write(path, updated)?;
+        return Ok(json!({"client": client, "path": path, "status": "installed"}));
     }
-    let existing = std::fs::read(&path).ok();
+    let existing = std::fs::read(path).ok();
     let mut root: Value = match &existing {
         Some(bytes) if !bytes.is_empty() => serde_json::from_slice(bytes).map_err(|e| {
             gry_core::GryError::invalid(format!(
@@ -1444,43 +1518,217 @@ fn install_cmd(config: &Config, cmd: &InstallCmd) -> gry_core::GryResult<()> {
             root["mcpServers"]["gry"] = entry;
         }
     }
-    if cmd.dry_run {
-        print_value(&json!({"client": client, "path": path, "dry_run": true, "result": root}));
-        return Ok(());
+    if dry_run {
+        return Ok(json!({"client": client, "path": path, "dry_run": true, "result": root}));
     }
-    backup(&path)?;
-    write_json_atomic(&path, &root)?;
-    print_value(&json!({"client": client, "path": path, "status": "installed"}));
+    ensure_parent(path)?;
+    backup(path)?;
+    write_json_atomic(path, &root)?;
+    Ok(json!({"client": client, "path": path, "status": "installed"}))
+}
+
+fn is_multi_client(client: &str) -> bool {
+    client == "auto" || client == "all"
+}
+
+fn resolve_clients(client: &str) -> gry_core::GryResult<Vec<String>> {
+    match client {
+        "auto" => Ok(detected_clients().into_iter().map(str::to_string).collect()),
+        "all" => Ok(SUPPORTED_CLIENTS
+            .iter()
+            .map(|(id, _)| (*id).to_string())
+            .collect()),
+        "none" => Ok(Vec::new()),
+        other => Ok(vec![other.to_string()]),
+    }
+}
+
+fn detected_clients() -> Vec<&'static str> {
+    SUPPORTED_CLIENTS
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| client_detected(id))
+        .collect()
+}
+
+fn client_detected(client: &str) -> bool {
+    if client_config_path(client).exists() {
+        return true;
+    }
+    let home = home_dir();
+    match client {
+        "claude" => home.join(".claude").is_dir() || command_exists("claude"),
+        "claude-desktop" => app_installed("Claude.app"),
+        "cursor" => {
+            home.join(".cursor").is_dir() || command_exists("cursor") || app_installed("Cursor.app")
+        }
+        "windsurf" => {
+            home.join(".codeium/windsurf").is_dir()
+                || command_exists("windsurf")
+                || app_installed("Windsurf.app")
+        }
+        "gemini" => home.join(".gemini").is_dir() || command_exists("gemini"),
+        "opencode" => home.join(".config/opencode").is_dir() || command_exists("opencode"),
+        "ohgo" => home.join(".ohgo").is_dir() || command_exists("ohgo"),
+        "codex" => home.join(".codex").is_dir() || command_exists("codex"),
+        "zed" => {
+            home.join(".config/zed").is_dir() || command_exists("zed") || app_installed("Zed.app")
+        }
+        "cline" => vscode_extension_dir("saoudrizwan.claude-dev").is_dir(),
+        "roo" => vscode_extension_dir("rooveterinaryinc.roo-cline").is_dir(),
+        "kilo" => vscode_extension_dir("kilocode.kilo-code").is_dir(),
+        "vscode" => {
+            command_exists("code")
+                || command_exists("code-insiders")
+                || app_installed("Visual Studio Code.app")
+                || app_installed("Visual Studio Code - Insiders.app")
+        }
+        "trae" => command_exists("trae") || app_installed("Trae.app"),
+        "qwen" => home.join(".qwen").is_dir() || command_exists("qwen"),
+        "augment" => {
+            home.join(".augment").is_dir()
+                || vscode_extension_dir("augment.vscode-augment").is_dir()
+        }
+        "amp" => home.join(".config/amp").is_dir() || command_exists("amp"),
+        _ => false,
+    }
+}
+
+fn command_exists(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(name);
+        candidate.is_file() && is_executable(&candidate)
+    })
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn app_installed(name: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        Path::new("/Applications").join(name).exists()
+            || home_dir().join("Applications").join(name).exists()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = name;
+        false
+    }
+}
+
+fn ensure_parent(path: &Path) -> gry_core::GryResult<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
     Ok(())
 }
 
 fn uninstall_cmd(cmd: &UninstallCmd) -> gry_core::GryResult<()> {
-    let path = cmd
-        .config
-        .clone()
-        .unwrap_or_else(|| client_config_path(&cmd.client));
-    if !path.exists() {
-        print_value(&json!({"client": cmd.client, "path": path, "status": "not_found"}));
-        return Ok(());
+    let multi = is_multi_client(&cmd.client);
+    if multi && cmd.config.is_some() {
+        return Err(gry_core::GryError::invalid(
+            "--config requires a single --client id",
+        ));
     }
-    if cmd.client == "codex" {
-        let text = std::fs::read_to_string(&path)?;
-        let updated = remove_toml_section(&text, "mcp_servers.gry");
-        if cmd.dry_run {
-            print_value(
-                &json!({"client": cmd.client, "path": path, "dry_run": true, "content": updated}),
-            );
-        } else {
-            std::fs::write(&path, updated)?;
-            print_value(&json!({"client": cmd.client, "path": path, "status": "removed"}));
+    let clients = resolve_clients(&cmd.client)?;
+    if clients.is_empty() {
+        let message =
+            "no supported agent harness detected; pass --client <id> (see --list-clients)";
+        if JSON_OUTPUT.load(Ordering::Relaxed) {
+            print_value(&json!({
+                "status": "none_detected",
+                "clients": [],
+                "message": message
+            }));
+        } else if !QUIET_OUTPUT.load(Ordering::Relaxed) {
+            eprintln!("gry: {message}");
         }
         return Ok(());
     }
-    let bytes = std::fs::read(&path)?;
+    let mut removed = Vec::new();
+    let mut failed = Vec::new();
+    for client in &clients {
+        let path = cmd
+            .config
+            .clone()
+            .unwrap_or_else(|| client_config_path(client));
+        match uninstall_client(client, &path, cmd.dry_run) {
+            Ok(value) => removed.push(value),
+            Err(error) => failed.push(json!({"client": client, "error": error.to_string()})),
+        }
+    }
+    if !multi {
+        if let Some(error) = failed.first() {
+            return Err(gry_core::GryError::invalid(
+                error["error"]
+                    .as_str()
+                    .unwrap_or("client uninstall failed")
+                    .to_string(),
+            ));
+        }
+        if let Some(value) = removed.first() {
+            print_value(value);
+        }
+        return Ok(());
+    }
+    let status = if failed.is_empty() {
+        "removed"
+    } else if removed.is_empty() {
+        "failed"
+    } else {
+        "partial"
+    };
+    print_value(&json!({
+        "status": status,
+        "detected": clients,
+        "removed": removed,
+        "failed": failed
+    }));
+    if !failed.is_empty() {
+        return Err(gry_core::GryError::invalid(format!(
+            "failed to uninstall {} client(s)",
+            failed.len()
+        )));
+    }
+    Ok(())
+}
+
+fn uninstall_client(client: &str, path: &Path, dry_run: bool) -> gry_core::GryResult<Value> {
+    if !path.exists() {
+        return Ok(json!({"client": client, "path": path, "status": "not_found"}));
+    }
+    if client == "codex" {
+        let text = std::fs::read_to_string(path)?;
+        let updated = remove_toml_section(&text, "mcp_servers.gry");
+        if dry_run {
+            return Ok(
+                json!({"client": client, "path": path, "dry_run": true, "content": updated}),
+            );
+        }
+        std::fs::write(path, updated)?;
+        return Ok(json!({"client": client, "path": path, "status": "removed"}));
+    }
+    let bytes = std::fs::read(path)?;
     let mut root: Value = serde_json::from_slice(&bytes).map_err(|e| {
         gry_core::GryError::invalid(format!("cannot parse {}: {e}", path.display()))
     })?;
-    match cmd.client.as_str() {
+    match client {
         "ohgo" => {
             if let Some(servers) = root
                 .get_mut("mcp")
@@ -1515,13 +1763,11 @@ fn uninstall_cmd(cmd: &UninstallCmd) -> gry_core::GryResult<()> {
             }
         }
     }
-    if cmd.dry_run {
-        print_value(&json!({"client": cmd.client, "path": path, "dry_run": true, "result": root}));
-    } else {
-        write_json_atomic(&path, &root)?;
-        print_value(&json!({"client": cmd.client, "path": path, "status": "removed"}));
+    if dry_run {
+        return Ok(json!({"client": client, "path": path, "dry_run": true, "result": root}));
     }
-    Ok(())
+    write_json_atomic(path, &root)?;
+    Ok(json!({"client": client, "path": path, "status": "removed"}))
 }
 
 fn skill_cmd(cmd: &SkillCmd) -> gry_core::GryResult<()> {
@@ -1549,10 +1795,28 @@ literal text, configuration values, comments and non-code files. If a result is
 ambiguous or unresolved, say so rather than guessing.
 "#;
     if cmd.install {
-        let dir = dirs_config().join("gry");
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("SKILL.md"), skill)?;
-        print_value(&json!({"status": "installed", "path": dir.join("SKILL.md")}));
+        // Keep the generic location, and also place the skill where Claude
+        // Code and OpenCode discover skills when those harnesses are present.
+        let mut targets = vec![dirs_config().join("gry/SKILL.md")];
+        let claude_home = home_dir().join(".claude");
+        if claude_home.is_dir() || home_dir().join(".claude.json").exists() {
+            targets.push(claude_home.join("skills/gry/SKILL.md"));
+        }
+        let opencode_home = dirs_config().join("opencode");
+        if opencode_home.is_dir() || opencode_home.join("opencode.json").exists() {
+            targets.push(opencode_home.join("skills/gry/SKILL.md"));
+        }
+        for path in &targets {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, skill)?;
+        }
+        print_value(&json!({
+            "status": "installed",
+            "path": targets[0].clone(),
+            "paths": targets.clone()
+        }));
     } else {
         println!("{skill}");
     }
@@ -1560,11 +1824,10 @@ ambiguous or unresolved, say so rather than guessing.
 }
 
 fn client_config_path(client: &str) -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let home = home_dir();
     match client {
         "claude" => home.join(".claude.json"),
+        "claude-desktop" => app_support_dir().join("Claude/claude_desktop_config.json"),
         "cursor" => home.join(".cursor/mcp.json"),
         "windsurf" => home.join(".codeium/windsurf/mcp_config.json"),
         "gemini" => home.join(".gemini/settings.json"),
@@ -1572,11 +1835,15 @@ fn client_config_path(client: &str) -> PathBuf {
         "ohgo" => home.join(".ohgo/settings.json"),
         "codex" => home.join(".codex/config.toml"),
         "zed" => home.join(".config/zed/settings.json"),
-        "cline" => home.join(".config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"),
-        "roo" => home.join(".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json"),
-        "kilo" => home.join(".config/Code/User/globalStorage/kilocode.kilo-code/settings/mcp_settings.json"),
-        "vscode" => home.join(".config/Code/User/mcp.json"),
-        "trae" => home.join(".config/Trae/User/mcp.json"),
+        "cline" => vscode_user_dir()
+            .join("globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"),
+        "roo" => vscode_user_dir()
+            .join("globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json"),
+        "kilo" => {
+            vscode_user_dir().join("globalStorage/kilocode.kilo-code/settings/mcp_settings.json")
+        }
+        "vscode" => vscode_user_dir().join("mcp.json"),
+        "trae" => app_support_dir().join("Trae/User/mcp.json"),
         "qwen" => home.join(".qwen/settings.json"),
         "augment" => home.join(".augment/settings.json"),
         "amp" => home.join(".config/amp/settings.json"),
@@ -1584,14 +1851,40 @@ fn client_config_path(client: &str) -> PathBuf {
     }
 }
 
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 fn dirs_config() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         PathBuf::from(xdg)
     } else {
-        std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join(".config"))
-            .unwrap_or_else(|| PathBuf::from("."))
+        home_dir().join(".config")
     }
+}
+
+fn app_support_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home_dir().join("Library/Application Support")
+    } else {
+        dirs_config()
+    }
+}
+
+fn vscode_user_dir() -> PathBuf {
+    let stable = app_support_dir().join("Code/User");
+    let insiders = app_support_dir().join("Code - Insiders/User");
+    if !stable.exists() && insiders.exists() {
+        insiders
+    } else {
+        stable
+    }
+}
+
+fn vscode_extension_dir(extension: &str) -> PathBuf {
+    vscode_user_dir().join("globalStorage").join(extension)
 }
 
 fn backup(path: &Path) -> gry_core::GryResult<()> {

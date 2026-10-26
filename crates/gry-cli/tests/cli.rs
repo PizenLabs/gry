@@ -133,11 +133,23 @@ fn generic_tool_and_serve_stdio() {
             json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
         )
         .unwrap();
-        writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_graph","arguments":{"project":"cli-serve","label":"Method"}}})).unwrap();
         writeln!(
             stdin,
             "{}",
-            json!({"jsonrpc":"2.0","id":4,"method":"shutdown"})
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"cursor":"6"}})
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/list","params":{"cursor":"12"}})
+        )
+        .unwrap();
+        writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_graph","arguments":{"project":"cli-serve","label":"Method"}}})).unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc":"2.0","id":6,"method":"shutdown"})
         )
         .unwrap();
     }
@@ -150,11 +162,11 @@ fn generic_tool_and_serve_stdio() {
     assert!(messages
         .iter()
         .any(|m| m["result"]["serverInfo"]["name"] == "gry"));
-    assert!(messages.iter().any(|m| m["result"]["tools"]
-        .as_array()
-        .map(|t| t.len())
-        .unwrap_or(0)
-        == 17));
+    let tool_pages: usize = messages
+        .iter()
+        .filter_map(|m| m["result"]["tools"].as_array().map(Vec::len))
+        .sum();
+    assert_eq!(tool_pages, 17);
     assert!(messages.iter().any(|m| m["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or("")
@@ -201,6 +213,60 @@ fn install_dry_run_is_non_destructive() {
     let config: Value =
         serde_json::from_slice(&fs::read(home.path().join(".claude.json")).unwrap()).unwrap();
     assert!(config["mcpServers"].get("gry").is_none());
+}
+
+#[test]
+fn ohgo_install_preserves_settings_and_classifies_tools() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join(".ohgo/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(
+        &settings,
+        r#"{"model":"groq/openai/gpt-oss-20b","identity":{"name":"dev"}}"#,
+    )
+    .unwrap();
+
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .args(["install", "--client", "ohgo"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(config["model"], "groq/openai/gpt-oss-20b");
+    assert_eq!(config["identity"]["name"], "dev");
+    let servers = config["mcp"]["servers"].as_array().unwrap();
+    assert_eq!(servers.len(), 1);
+    assert_eq!(servers[0]["name"], "gry");
+    assert_eq!(servers[0]["args"][0], "serve");
+    assert_eq!(servers[0]["env"][0], "GRY_CACHE_DIR");
+    assert_eq!(servers[0]["tools"]["search_graph"], "read");
+    assert_eq!(servers[0]["tools"]["index_repository"], "mutate");
+    assert!(servers[0]["allowMutation"].is_null());
+
+    // Re-installing replaces the gry entry instead of duplicating it.
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .args(["install", "--client", "ohgo"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let config: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(config["mcp"]["servers"].as_array().unwrap().len(), 1);
+
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .args(["uninstall", "--client", "ohgo"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let config: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(config["model"], "groq/openai/gpt-oss-20b");
+    assert!(config["mcp"]["servers"].as_array().unwrap().is_empty());
 }
 
 #[test]

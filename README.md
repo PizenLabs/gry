@@ -166,6 +166,7 @@ Or let gry edit a client configuration safely (backup and atomic write; `--dry-r
 gry install --client claude
 gry install --client cursor
 gry install --client opencode
+gry install --client ohgo
 gry install --client codex
 gry install --client zed
 gry install --client vscode
@@ -177,8 +178,9 @@ gry install --list-clients
 gry uninstall --client claude
 ```
 
-Fifteen tested JSON/TOML adapters are covered (Claude, Cursor, Windsurf, Gemini, OpenCode, Codex,
-Zed, Cline, Roo, Kilo, VS Code, Trae, Qwen, Augment, and Amp). Unknown JSON is preserved; files that
+Sixteen tested JSON/TOML adapters are covered (Claude, Cursor, Windsurf, Gemini, OpenCode, OHGO,
+Codex, Zed, Cline, Roo, Kilo, VS Code, Trae, Qwen, Augment, and Amp). The OHGO adapter writes its
+`mcp.servers` entry with explicit read/mutate classifications. Unknown JSON is preserved; files that
 are not valid JSON are refused rather than overwritten. Other clients can be configured with
 `--config`.
 

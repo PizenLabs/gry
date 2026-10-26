@@ -1289,6 +1289,7 @@ const SUPPORTED_CLIENTS: &[(&str, &str)] = &[
     ("windsurf", "Windsurf (~/.codeium/windsurf/mcp_config.json)"),
     ("gemini", "Gemini CLI (~/.gemini/settings.json)"),
     ("opencode", "OpenCode (~/.config/opencode/opencode.json)"),
+    ("ohgo", "OHGO (~/.ohgo/settings.json)"),
     ("codex", "Codex CLI (~/.codex/config.toml)"),
     ("zed", "Zed (~/.config/zed/settings.json)"),
     ("cline", "Cline (VS Code global storage)"),
@@ -1362,6 +1363,52 @@ fn install_cmd(config: &Config, cmd: &InstallCmd) -> gry_core::GryResult<()> {
         "args": ["serve"],
     });
     match client {
+        "ohgo" => {
+            if !root["mcp"].is_object() {
+                root["mcp"] = json!({});
+            }
+            let mcp = root["mcp"].as_object_mut().expect("mcp object");
+            if !mcp.get("servers").map(Value::is_array).unwrap_or(false) {
+                mcp.insert("servers".into(), json!([]));
+            }
+            let servers = mcp
+                .get_mut("servers")
+                .and_then(Value::as_array_mut)
+                .expect("servers array");
+            servers.retain(|server| server.get("name").and_then(Value::as_str) != Some("gry"));
+            // OHGO classifies every MCP tool explicitly and fails closed for
+            // an unlisted name. Read tools stay read-only; the tools that
+            // change graph state are classified mutate and remain blocked
+            // until the user sets allowMutation.
+            servers.push(json!({
+                "name": "gry",
+                "command": exe,
+                "args": ["serve"],
+                "env": ["GRY_CACHE_DIR", "GRY_DB"],
+                "tools": {
+                    "index_repository": "mutate",
+                    "search_graph": "read",
+                    "query_graph": "read",
+                    "trace_path": "read",
+                    "get_code_snippet": "read",
+                    "get_file_outline": "read",
+                    "get_graph_schema": "read",
+                    "compare_graphs": "read",
+                    "get_architecture": "read",
+                    "search_code": "read",
+                    "list_projects": "read",
+                    "delete_project": "mutate",
+                    "index_status": "read",
+                    "check_index_coverage": "read",
+                    "detect_changes": "read",
+                    "manage_adr": "mutate",
+                    "ingest_traces": "mutate"
+                },
+                "maxBytes": 1048576,
+                "maxItems": 64,
+                "maxTextChars": 60000
+            }));
+        }
         "opencode" => {
             if !root["mcp"].is_object() {
                 root["mcp"] = json!({});
@@ -1434,6 +1481,16 @@ fn uninstall_cmd(cmd: &UninstallCmd) -> gry_core::GryResult<()> {
         gry_core::GryError::invalid(format!("cannot parse {}: {e}", path.display()))
     })?;
     match cmd.client.as_str() {
+        "ohgo" => {
+            if let Some(servers) = root
+                .get_mut("mcp")
+                .and_then(Value::as_object_mut)
+                .and_then(|mcp| mcp.get_mut("servers"))
+                .and_then(Value::as_array_mut)
+            {
+                servers.retain(|server| server.get("name").and_then(Value::as_str) != Some("gry"));
+            }
+        }
         "opencode" => {
             if let Some(map) = root.get_mut("mcp").and_then(Value::as_object_mut) {
                 map.remove("gry");
@@ -1512,6 +1569,7 @@ fn client_config_path(client: &str) -> PathBuf {
         "windsurf" => home.join(".codeium/windsurf/mcp_config.json"),
         "gemini" => home.join(".gemini/settings.json"),
         "opencode" => home.join(".config/opencode/opencode.json"),
+        "ohgo" => home.join(".ohgo/settings.json"),
         "codex" => home.join(".codex/config.toml"),
         "zed" => home.join(".config/zed/settings.json"),
         "cline" => home.join(".config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"),

@@ -180,22 +180,23 @@ impl Server {
             .into_iter()
             .filter(|tool| crate::tools::tool_visible(self.profile, tool))
             .collect();
-        let cursor = params.get("cursor").and_then(Value::as_str);
-        let (page, next) = match cursor {
-            None => (visible.iter().collect::<Vec<_>>(), None),
-            Some(cursor) => {
-                let offset: usize = cursor
-                    .parse()
-                    .map_err(|_| (-32602, format!("invalid cursor: {cursor}")))?;
-                let end = (offset + TOOLS_PAGE_SIZE).min(visible.len());
-                let page: Vec<_> = visible[offset.min(visible.len())..end].iter().collect();
-                let next = if end < visible.len() {
-                    Some(end.to_string())
-                } else {
-                    None
-                };
-                (page, next)
-            }
+        let offset = match params.get("cursor").and_then(Value::as_str) {
+            None => 0,
+            Some(cursor) => cursor
+                .parse()
+                .map_err(|_| (-32602, format!("invalid cursor: {cursor}")))?,
+        };
+        // The first page is bounded too. Returning every tool on the first
+        // call and paginating only later cursors makes the advertised page
+        // size depend on how the client happened to start, and forces large
+        // tool lists into one response for spec-compliant clients.
+        let offset = offset.min(visible.len());
+        let end = (offset + TOOLS_PAGE_SIZE).min(visible.len());
+        let page: Vec<_> = visible[offset..end].iter().collect();
+        let next = if end < visible.len() {
+            Some(end.to_string())
+        } else {
+            None
         };
         let mut out = json!({"tools": page.iter().map(|t| tool_json(t)).collect::<Vec<_>>()});
         if let Some(next) = next {
@@ -398,6 +399,55 @@ fn read_message(reader: &mut impl BufRead) -> std::io::Result<Option<Value>> {
 mod tests {
     use super::*;
 
+    fn all_tools(server: &mut Server) -> Vec<Value> {
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let params = match &cursor {
+                Some(cursor) => json!({"cursor": cursor}),
+                None => json!({}),
+            };
+            let response = server
+                .handle(json!({"jsonrpc":"2.0","id":9,"method":"tools/list","params":params}))
+                .unwrap();
+            tools.extend(
+                response["result"]["tools"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            match response["result"]["nextCursor"].as_str() {
+                Some(next) => cursor = Some(next.to_string()),
+                None => return tools,
+            }
+        }
+    }
+
+    #[test]
+    fn tools_list_pages_from_the_first_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            cache_dir: dir.path().join("cache"),
+            db_path: dir.path().join("cache/graph.db"),
+            allowed_root: None,
+            workers: 1,
+            max_files: None,
+            max_source_mb: None,
+            settings: gry_core::config::RuntimeSettings::default(),
+        };
+        let mut server = Server::new(config, ToolProfile::All);
+        let first = server
+            .handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+            .unwrap();
+        assert_eq!(first["result"]["tools"].as_array().unwrap().len(), 6);
+        assert_eq!(first["result"]["nextCursor"], "6");
+        let all = all_tools(&mut server);
+        assert_eq!(all.len(), 17);
+        let names: Vec<&str> = all.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"query_graph"));
+        assert!(names.contains(&"ingest_traces"));
+    }
+
     #[test]
     fn initialize_negotiates_and_advertises_tools() {
         let dir = tempfile::tempdir().unwrap();
@@ -423,15 +473,9 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("search_graph"));
-        let tools = server
-            .handle(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
-            .unwrap();
-        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 17);
-        assert!(tools["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|t| t["name"] == "query_graph"));
+        let tools = all_tools(&mut server);
+        assert_eq!(tools.len(), 17);
+        assert!(tools.iter().any(|t| t["name"] == "query_graph"));
     }
 
     #[test]
@@ -447,15 +491,8 @@ mod tests {
             settings: gry_core::config::RuntimeSettings::default(),
         };
         let mut server = Server::new(config, ToolProfile::Analysis);
-        let tools = server
-            .handle(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
-            .unwrap();
-        let names: Vec<&str> = tools["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t["name"].as_str())
-            .collect();
+        let tools = all_tools(&mut server);
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(!names.contains(&"index_repository"));
         assert!(!names.contains(&"delete_project"));
         assert!(names.contains(&"search_graph"));

@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `gry install --client ohgo` and matching uninstall: writes OHGO's
+  `~/.ohgo/settings.json` `mcp.servers` entry with explicit read/mutate
+  classifications, bounded response settings, and `GRY_CACHE_DIR`/`GRY_DB`
+  environment passthrough. Existing OHGO settings and unrelated servers are
+  preserved.
+- MCP `tools/list` now paginates from the first page with `nextCursor` instead
+  of returning every tool on cursorless calls and paginating only continuations.
+  Spec-compliant clients see a bounded first page and follow cursors to the
+  complete list; the advertised page size is the same whether or not the client
+  sent a cursor.
+
 ## 1.0.0 — 2026-10-26
 
 First independent release of gry: local-first code intelligence for AI agents.

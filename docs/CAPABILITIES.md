@@ -135,7 +135,7 @@ full list of node labels, edge types and the language set is in the [README](../
 | OPS-07 | VERIFIED | CLI test | cache/db environment, settings list/get/set/reset |
 | OPS-08 | VERIFIED | U | allowed-root containment refusal |
 | OPS-09 | PARTIAL | M, CLI | status/coverage/diagnostics and `gry doctor`; no retained trajectory/snapshot history |
-| OPS-10 | PARTIAL | CLI test | Safe JSON/TOML edits for 15 curated clients + `--list-clients`; broader client matrix not implemented |
+| OPS-10 | PARTIAL | CLI test | Safe JSON/TOML edits for 16 curated clients + `--list-clients`; broader client matrix not implemented |
 | OPS-11 | VERIFIED | CLI test | one-shot `gry cli` with flags/args-file/stdin; every tool callable |
 | OPS-12 | VERIFIED | U, M | deterministic 4-bytes/token budget, whole-row truncation, snapshot cursors and continuation metadata |
 
@@ -181,7 +181,7 @@ hidden failures.
 - **Derived semantic edges** are preserved across a delta and refreshed on a full index; they can lag
   after a one-file edit by design. Structural edges remain exact.
 - **Output** is compact JSON (or pretty JSON); there is no tree-text renderer.
-- **Client setup** covers 15 tested JSON/TOML adapters; other clients use `--config`.
+- **Client setup** covers 16 tested JSON/TOML adapters; other clients use `--config`.
 - **Infrastructure evaluation** is bounded: Helm template/value linking without full rendering,
   Kustomize overrides without full strategic merge, Terraform refs/defaults without full HCL
   evaluation, and basic dbt `ref`/`source` lineage.

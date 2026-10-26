@@ -70,7 +70,7 @@ First independent release of gry: local-first code intelligence for AI agents.
 
 ### Independence and identity
 
-- gry is now documented and licensed as an independent project (`The gry authors`) under the
+- gry is now documented and licensed as an independent project (`PizenLabs`) under the
   Apache License 2.0; all organization-specific branding has been removed.
 - Added community health files: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, and
   `NOTICE`.

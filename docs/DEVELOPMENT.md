@@ -197,10 +197,17 @@ Publish manually (requires a crates.io token in `CARGO_REGISTRY_TOKEN`, or `carg
 CONFIRM=yes make publish
 ```
 
-`scripts/publish.sh` publishes in dependency order, waits for the registry index between crates,
-retries transient failures, and skips versions that are already published. Override the delay with
-`PUBLISH_DELAY` (seconds, default 20) and the per-crate attempt count with `MAX_ATTEMPTS` (default
-3). Pass `--no-verify` to skip the per-crate verification build.
+`scripts/publish.sh` publishes each crate with its own `cargo publish -p <crate>` invocation in
+dependency order, retries transient failures, and skips versions that are already published. When a
+publish fails because a sibling crate is still missing from the registry index, it waits (up to
+`WAIT_TIMEOUT` seconds) for that dependency and retries. Do not run a bare `cargo publish` at the
+workspace root: Cargo then waits for every uploaded crate to appear in the index with a short
+built-in timeout, and a crates.io backlog aborts the remaining crates.
+Override the poll interval and retry delay with `PUBLISH_DELAY` (seconds, default 20), the
+per-dependency index wait with `WAIT_TIMEOUT` (seconds, default 900), and the attempt count with
+`MAX_ATTEMPTS` (default 3). Pass `--no-verify` to skip the per-crate verification build. If a run is
+interrupted or times out mid-way, rerun the same command: crates that are already on crates.io are
+skipped and the remaining ones continue.
 
 For automated releases, add a repository secret named `CARGO_REGISTRY_TOKEN` containing a crates.io
 API token with publish scope. On a `v*` tag the release workflow checks that the tag matches the
@@ -208,6 +215,16 @@ workspace version, then publishes all crates after the GitHub release assets are
 
 Note that crates.io does not allow wildcard (`*`) dependency requirements, which is why the
 tree-sitter grammars in `gry-parse` are pinned to resolved versions.
+
+If crates.io accepts an upload but the version never appears in the registry index
+(`https://index.crates.io/<ab>/<cd>/<crate>`), dependent crates fail with `no matching package
+named ...` or `failed to select a version`. Compare the latest commit time of
+[`rust-lang/crates.io-index`](https://github.com/rust-lang/crates.io-index/commits/master); if it
+is many minutes old, the index is stalled on crates.io's side, regardless of what
+`https://status.crates.io` reports. `scripts/publish.sh` treats "uploaded but not indexed" as a
+blocker rather than a success, and `verify_index` fails the run with the missing crate names. Wait
+for the index to resume and rerun the same command: versions already accepted by the API are
+skipped while missing index entries are waited on, so nothing needs to be republished.
 
 ## Documentation conventions
 

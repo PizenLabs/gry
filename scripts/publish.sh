@@ -136,6 +136,8 @@ verify_index() {
   for crate in "${CRATES[@]}"; do
     if indexed "$crate"; then
       log "verified ${crate} ${VERSION} in the registry index"
+    elif published "$crate" && wait_for_index "$crate"; then
+      log "verified ${crate} ${VERSION} in the registry index"
     else
       missing+=("$crate")
       log "error: ${crate} ${VERSION} is not in the registry index" >&2
@@ -147,7 +149,12 @@ verify_index() {
 }
 
 publish_one() {
-  local crate="$1" attempt=1 status log_file propagation missing_dep
+  local crate="$1" attempt=1 status log_file propagation missing_dep current_version
+  current_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+  [ -n "$current_version" ] || die "could not read the workspace version from Cargo.toml"
+  if [ "$current_version" != "$VERSION" ]; then
+    die "workspace version changed from ${VERSION} to ${current_version} during the run; rerun the script so the remaining crates are published at ${current_version}"
+  fi
   if [ "$SKIP_PUBLISHED" = "1" ] && published "$crate"; then
     if wait_for_index "$crate"; then
       log "${crate} ${VERSION} is already on crates.io, skipping"
@@ -182,6 +189,9 @@ publish_one() {
       propagation=1
     fi
     missing_dep="$(sed -n 's/.*no matching package named `\([^`]*\)` found.*/\1/p' "$log_file" | head -n 1)"
+    if [ -z "$missing_dep" ]; then
+      missing_dep="$(sed -n 's/.*failed to select a version for the requirement `\([A-Za-z0-9_-]*\).*/\1/p' "$log_file" | head -n 1)"
+    fi
     rm -f "$log_file"
 
     if [ "$SKIP_PUBLISHED" = "1" ]; then

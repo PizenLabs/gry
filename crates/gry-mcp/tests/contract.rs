@@ -105,7 +105,7 @@ fn call(server: &mut Server, name: &str, args: Value) -> Value {
 }
 
 #[test]
-fn all_seventeen_tools_succeed() {
+fn all_eighteen_tools_succeed() {
     let dir = fixture();
     let root = dir.path().join("repo");
     let mut srv = server(&dir);
@@ -192,6 +192,28 @@ fn all_seventeen_tools_succeed() {
         json!({"project":"repo","pattern":"Parser","mode":"compact"}),
     );
     assert!(!code["results"].as_array().unwrap().is_empty());
+    let context = call(
+        &mut srv,
+        "get_task_context",
+        json!({"project":"repo","targets":["repo.src.lib.Engine.parse"],"profile":"scout","max_output_tokens":1200}),
+    );
+    assert_eq!(context["status"], "ok");
+    assert!(context["nodes"].as_array().unwrap().len() >= 2);
+    assert!(context["budget"]["estimated_tokens"].as_u64().unwrap() <= 1200);
+    let audit = call(
+        &mut srv,
+        "get_task_context",
+        json!({"project":"repo","targets":["repo.src.lib.Engine.parse"],"profile":"auditor","changed_paths":["src/lib.rs"]}),
+    );
+    assert!(audit["checks"].is_array());
+    assert!(audit["safety"].as_str().unwrap().contains("not proof"));
+    let empty = call(&mut srv, "get_task_context", json!({"project":"repo"}));
+    assert_eq!(empty["status"], "empty");
+    assert!(empty["unknowns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|u| u["code"] == "no_targets"));
 
     // Worktree change for detect_changes.
     write(&root, "src/parser.rs", "pub struct Parser;\nimpl Parser {\n pub fn new() -> Self { Parser }\n pub fn run(&self, input: &str) -> usize { input.len() + 1 }\n}\n");
@@ -244,6 +266,14 @@ fn errors_and_prompts() {
         .handle_message(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_graph","arguments":{}}}))
         .unwrap();
     assert_eq!(missing["result"]["isError"], true);
+    let unindexed = srv
+        .handle_message(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_task_context","arguments":{"project":"nope","targets":["x"]}}}))
+        .unwrap();
+    assert_eq!(unindexed["result"]["isError"], true);
+    assert!(unindexed["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("project not found or not indexed"));
     let prompt = srv
         .handle_message(json!({"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"review_change_impact","arguments":{"project":"p","change":"x"}}}))
         .unwrap();

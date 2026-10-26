@@ -166,7 +166,7 @@ fn generic_tool_and_serve_stdio() {
         .iter()
         .filter_map(|m| m["result"]["tools"].as_array().map(Vec::len))
         .sum();
-    assert_eq!(tool_pages, 17);
+    assert_eq!(tool_pages, 18);
     assert!(messages.iter().any(|m| m["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or("")
@@ -593,4 +593,123 @@ fn test_impact_select_and_publish() {
     assert!(out.join("graph.db.zst").is_file());
     assert!(out.join("receipt.json").is_file());
     assert_eq!(receipt["commit"], commit);
+}
+
+#[test]
+fn context_and_lifecycle_hooks_are_bounded_and_explicit() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    run(
+        &cache,
+        &["index", root.to_str().unwrap(), "--name", "cli-context"],
+    );
+
+    let context = run(
+        &cache,
+        &[
+            "context",
+            "cli-context",
+            "--target",
+            "parse",
+            "--profile",
+            "scout",
+            "--max-tokens",
+            "800",
+        ],
+    );
+    assert_eq!(context["status"], "ok");
+    assert_eq!(context["profile"], "scout");
+    assert!(context["budget"]["estimated_tokens"].as_u64().unwrap() <= 800);
+    assert!(context["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["name"] == "parse"));
+
+    let first = run(
+        &cache,
+        &[
+            "hook",
+            "before_edit",
+            "--project",
+            "cli-context",
+            "--target",
+            "parse",
+            "--max-tokens",
+            "800",
+        ],
+    );
+    assert_eq!(first["hook"]["status"], "ok");
+    assert_eq!(first["hook"]["cached"], false);
+    let second = run(
+        &cache,
+        &[
+            "hook",
+            "before_edit",
+            "--project",
+            "cli-context",
+            "--target",
+            "parse",
+            "--max-tokens",
+            "800",
+        ],
+    );
+    assert_eq!(second["hook"]["cached"], true);
+
+    let missing = run(
+        &cache,
+        &[
+            "hook",
+            "before_plan",
+            "--project",
+            "not-indexed",
+            "--target",
+            "x",
+        ],
+    );
+    assert_eq!(missing["hook"]["status"], "not_indexed");
+    assert_eq!(missing["failure"]["code"], "not_indexed");
+    assert!(missing["context"].is_null());
+
+    let recursive = Command::new(bin())
+        .arg("--cache-dir")
+        .arg(&cache)
+        .env("GRY_HOOK_ACTIVE", "1")
+        .args([
+            "hook",
+            "before_edit",
+            "--project",
+            "cli-context",
+            "--target",
+            "parse",
+        ])
+        .output()
+        .unwrap();
+    assert!(recursive.status.success());
+    let recursive: Value = serde_json::from_slice(&recursive.stdout).unwrap();
+    assert_eq!(recursive["hook"]["status"], "unavailable");
+    assert_eq!(recursive["failure"]["code"], "recursive_hook");
+}
+
+#[test]
+fn context_unknown_project_fails_with_a_typed_error() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    run(
+        &cache,
+        &[
+            "index",
+            root.to_str().unwrap(),
+            "--name",
+            "cli-context-error",
+        ],
+    );
+    let output = Command::new(bin())
+        .arg("--cache-dir")
+        .arg(&cache)
+        .args(["context", "missing-project", "--target", "parse"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("project not found or not indexed"));
 }

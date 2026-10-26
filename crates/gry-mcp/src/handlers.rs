@@ -7,6 +7,7 @@ use gry_index::pipeline::{IndexRequest, Indexer};
 use gry_query::adr::{manage_adr, AdrRequest};
 use gry_query::architecture::{get_architecture, ArchitectureRequest};
 use gry_query::compare::compare_graphs;
+use gry_query::context::{get_task_context, ContextRequest};
 use gry_query::coverage::{check_index_coverage, index_status};
 use gry_query::cypher::{query_graph, QueryRequest};
 use gry_query::impact::{detect_changes, DetectChangesRequest};
@@ -141,6 +142,7 @@ pub fn dispatch(
         "compare_graphs" => compare_tool(ctx, args),
         "get_architecture" => architecture_tool(ctx, args),
         "search_code" => search_code_tool(ctx, args),
+        "get_task_context" => context_tool(ctx, args),
         "detect_changes" => changes_tool(ctx, args),
         "manage_adr" => adr_tool(ctx, args),
         "ingest_traces" => traces_tool(ctx, args),
@@ -515,6 +517,32 @@ fn search_code_tool(
         cursor: s(args, "cursor"),
     };
     let value = search_code(&store, &req)?;
+    Ok((value, format(args), max_tokens(args, 3200)))
+}
+
+fn context_tool(
+    ctx: &Ctx<'_>,
+    args: &Map<String, Value>,
+) -> gry_core::GryResult<(Value, String, usize)> {
+    let project = ctx.project(args)?;
+    ctx.remember(&project);
+    let store = ctx.store()?;
+    let req = ContextRequest {
+        project,
+        task: s(args, "task"),
+        targets: arr_strings(args, "targets"),
+        profile: s(args, "profile").unwrap_or_else(|| "context".to_string()),
+        depth: u(args, "depth", 2).clamp(1, 5),
+        max_nodes: u(args, "max_nodes", 40).clamp(1, 120),
+        max_tokens: max_tokens(args, 3200).clamp(128, 1_000_000),
+        include: arr_strings(args, "include"),
+        expected_generation: s(args, "expected_generation"),
+        changed_paths: arr_strings(args, "changed_paths"),
+        timeout_ms: u(args, "timeout_ms", 3000).clamp(1, 30_000) as u64,
+        task_id: None,
+        stage: None,
+    };
+    let value = get_task_context(&store, &req)?;
     Ok((value, format(args), max_tokens(args, 3200)))
 }
 

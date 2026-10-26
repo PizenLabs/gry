@@ -264,3 +264,300 @@ fn compare_detects_added_nodes_between_projects() {
         .iter()
         .any(|r| r["name"] == "only_here"));
 }
+
+fn infra_fixture(root: &Path) {
+    write(
+        root,
+        "src/api.rs",
+        r#"
+pub fn handler() -> usize { save() }
+fn save() -> usize { 1 }
+fn main() { handler(); }
+"#,
+    );
+    write(
+        root,
+        "deploy/docker-compose.yml",
+        r#"services:
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    networks: [backend]
+    environment:
+      DB_HOST: db
+      DB_PASSWORD: supersecret-value
+    secrets: [db_password]
+    depends_on: [db]
+  db:
+    image: postgres:16
+    networks: [backend]
+networks:
+  backend: {}
+secrets:
+  db_password:
+    file: ./db_password.txt
+"#,
+    );
+    write(
+        root,
+        "deploy/k8s.yaml",
+        r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels:
+    app: api
+spec:
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+      - name: api
+        image: acme/api:1
+        envFrom:
+        - configMapRef:
+            name: app_config
+        - secretRef:
+            name: db_password
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector:
+    app: api
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+spec:
+  tls:
+  - secretName: tls-cert
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /orders
+        pathType: Prefix
+        backend:
+          service:
+            name: api
+            port:
+              number: 8080
+"#,
+    );
+    write(
+        root,
+        "infra/main.tf",
+        r#"resource "aws_instance" "web" {
+  subnet_id = aws_subnet.main.id
+}
+resource "aws_subnet" "main" {
+  cidr_block = "10.0.0.0/24"
+}
+module "net" {
+  source = "./modules/net"
+  version = "1.2.3"
+}
+"#,
+    );
+    write(
+        root,
+        "infra/modules/net/main.tf",
+        "variable \"region\" {}\n",
+    );
+    write(
+        root,
+        "docs/arch.md",
+        "# Architecture\n\nThe `handler` saves orders.\n",
+    );
+}
+
+#[test]
+fn bounded_context_scout_and_auditor_reuse_the_graph() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    infra_fixture(&root);
+    let cfg = config(dir.path());
+    let report = Indexer::new(cfg.clone())
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    let store = Store::open(&cfg.db_path).unwrap();
+
+    let context = gry_query::context::get_task_context(
+        &store,
+        &gry_query::context::ContextRequest {
+            project: report.project.clone(),
+            targets: vec![format!("{}.src.api.handler", report.project)],
+            profile: "context".into(),
+            include: vec![
+                "callers".into(),
+                "callees".into(),
+                "services".into(),
+                "coverage".into(),
+            ],
+            max_tokens: 2400,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(context["status"], "ok");
+    assert!(context["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["name"] == "save"));
+    assert!(context["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["name"] == "main"));
+    assert!(context["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["path"] == "src/api.rs"));
+    assert!(context["budget"]["estimated_tokens"].as_u64().unwrap() <= 2400);
+    assert!(!context.to_string().contains("supersecret-value"));
+
+    // Infrastructure evidence is reachable from a declared service target.
+    let service = store
+        .search(&gry_store::search::SearchParams {
+            project: report.project.clone(),
+            name_pattern: Some("^api$".into()),
+            limit: 10,
+            ..Default::default()
+        })
+        .unwrap();
+    let api_qn = service
+        .hits
+        .iter()
+        .find(|h| h.node.label == "Resource" && h.node.qualified_name.contains("compose/Service"))
+        .map(|h| h.node.qualified_name.clone())
+        .expect("compose api service");
+    let infra_context = gry_query::context::get_task_context(
+        &store,
+        &gry_query::context::ContextRequest {
+            project: report.project.clone(),
+            targets: vec![api_qn],
+            include: vec!["services".into()],
+            max_tokens: 2400,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let services = infra_context["services"].as_array().unwrap();
+    assert!(services.iter().any(|s| s["kind"] == "Network"));
+    assert!(services.iter().any(|s| s["kind"] == "Secret"));
+    assert!(infra_context["boundaries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b["root"] == "deploy"));
+    assert!(infra_context["relationships"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["type"] == "USES_NETWORK"));
+
+    let scout = gry_query::context::get_task_context(
+        &store,
+        &gry_query::context::ContextRequest {
+            project: report.project.clone(),
+            targets: vec!["handler".into()],
+            profile: "scout".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(scout["map"]["symbols"].as_array().unwrap().len() >= 2);
+
+    let audit = gry_query::context::get_task_context(
+        &store,
+        &gry_query::context::ContextRequest {
+            project: report.project.clone(),
+            profile: "auditor".into(),
+            changed_paths: vec!["src/api.rs".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(audit["changes"]["source"], "caller");
+    assert_eq!(audit["changes"]["total"], 1);
+    assert!(audit["checks"].as_array().unwrap().len() >= 6);
+    assert!(audit["safety"].as_str().unwrap().contains("not proof"));
+    assert!(!audit.to_string().contains("safe_to_merge"));
+}
+
+#[test]
+fn hooks_share_context_and_cache_by_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    infra_fixture(&root);
+    let cfg = config(dir.path());
+    let report = Indexer::new(cfg.clone())
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    let store = Store::open(&cfg.db_path).unwrap();
+
+    let req = gry_query::hooks::HookRequest {
+        stage: "before_edit".into(),
+        project: report.project.clone(),
+        targets: vec!["handler".into()],
+        task: Some("change the save path".into()),
+        ..Default::default()
+    };
+    let first = gry_query::hooks::run_hook(&store, &req, Some(&cfg.cache_dir)).unwrap();
+    assert_eq!(first["hook"]["status"], "ok");
+    assert_eq!(first["hook"]["cached"], false);
+    assert_eq!(first["context"]["profile"], "context");
+    let second = gry_query::hooks::run_hook(&store, &req, Some(&cfg.cache_dir)).unwrap();
+    assert_eq!(second["hook"]["cached"], true);
+
+    let mut after = req.clone();
+    after.stage = "after_edit".into();
+    after.targets.clear();
+    after.changed_paths = vec!["src/api.rs".into()];
+    let after = gry_query::hooks::run_hook(&store, &after, None).unwrap();
+    assert_eq!(after["hook"]["status"], "ok");
+    assert_eq!(after["context"]["profile"], "auditor");
+    assert_eq!(after["context"]["changes"]["source"], "caller");
+}
+
+#[test]
+fn stale_context_is_disclosed_after_an_unindexed_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    infra_fixture(&root);
+    let cfg = config(dir.path());
+    let report = Indexer::new(cfg.clone())
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    write(
+        &root,
+        "src/api.rs",
+        "pub fn handler() -> usize { save() + 1 }\nfn save() -> usize { 2 }\nfn main() { handler(); }\n",
+    );
+    let store = Store::open(&cfg.db_path).unwrap();
+    let context = gry_query::context::get_task_context(
+        &store,
+        &gry_query::context::ContextRequest {
+            project: report.project.clone(),
+            targets: vec!["handler".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(context["status"], "stale");
+    assert_eq!(context["freshness"]["stale"], true);
+    assert!(context["unknowns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|u| u["kind"] == "stale_index"));
+}

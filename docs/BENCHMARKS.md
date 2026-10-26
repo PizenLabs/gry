@@ -68,6 +68,46 @@ This workload meets the two headline targets:
 - incremental single-file update **< 300 ms p50** (233 ms)
 - full index throughput **≥ 800 files/s** (2,800 files/s)
 
+## Workload C — bounded context and lifecycle hooks
+
+There was no pre-existing context implementation, so these are first measurements rather than a
+before/after comparison. Both fixtures were indexed into throwaway caches with the release binary.
+CLI numbers include process startup (~9 ms p50).
+
+| Fixture | Files | Source | Nodes | Edges | Full index |
+|---|---:|---:|---:|---:|---:|
+| gry repository | 91 | 1.42 MB | 3,673 | 17,172 | 1.20 s |
+| synthetic C | 2,001 | 0.25 MB | 8,005 | 14,005 | 1.08 s (191 MB peak RSS) |
+
+Index timings vary with page cache; repeated runs of the gry fixture ranged 0.8–1.2 s. Context and
+hook latency, 9 runs each:
+
+| Operation | Fixture | p50 | p95 | Output |
+|---|---|---:|---:|---:|
+| `gry context` target, 1600-token budget | gry | 14.8 ms | 15.4 ms | 5,623 B (~1,405 tokens) |
+| `gry context` target, 3200-token budget | gry | 14.2 ms | 15.5 ms | 11,603 B (~2,900 tokens) |
+| `gry context --profile scout` | gry | 16.6 ms | 18.5 ms | 5,767 B (~1,441 tokens) |
+| `gry context --profile auditor` | gry | 16.6 ms | 18.8 ms | 5,826 B (~1,456 tokens) |
+| `gry hook before_edit` | gry | 13.2 ms | 20.0 ms | 5,205 B (~1,301 tokens) |
+| `gry context` depth 3 / 80 nodes | synthetic C | 22.9 ms | 27.4 ms | 11,825 B (~2,956 tokens) |
+| `gry context` depth 2 | synthetic C | 16.6 ms | 34.9 ms | 5,466 B (~1,366 tokens) |
+
+Hook cache behavior on the gry fixture:
+
+| Path | Latency | Notes |
+|---|---:|---|
+| Cold dispatch | 18.6 ms | context assembled and cached |
+| Warm duplicate (same generation/inputs) | 12.4 ms | `hook.cached=true`; freshness revalidated |
+| `--no-cache` | 17.3 ms | fresh assembly every time |
+
+MCP discovery with 18 tools: **9.0 ms**, 17,017 bytes of compact tool schemas (15,549 bytes for the
+17 previous tools plus 1,468 bytes for `get_task_context`), delivered in three 6-tool pages.
+
+The hard budget is enforced on the compact payload: 1600-token context output stayed under 6,400
+bytes and 3200-token output under 12,800 bytes. `truncated=true` and `budget.omitted` were present
+when rows were dropped. `gry context` and `gry hook` always emit compact JSON so the same ceiling
+applies to CLI output; `--json` is unnecessary for machine consumers.
+
 ## Measurement commands
 
 ```bash

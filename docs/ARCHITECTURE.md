@@ -111,7 +111,9 @@ flowchart LR
 3. **Extraction**: tree-sitter per file, with language-specific node classification and generic
    fallbacks. Extraction records definitions, calls, imports, usages, bases, decorators, routes,
    env accesses, channels, spawns, HTTP calls, docs sections, config keys, package metadata and
-   infrastructure nodes/edges. Files are parsed in parallel on a bounded Rayon pool.
+   infrastructure nodes/edges. Compose service/network/volume/secret/config references, Kubernetes
+Ingress routes plus ConfigMap/Secret name references, and Terraform resource addresses are recorded
+as declared relationships. Files are parsed in parallel on a bounded Rayon pool.
 4. **Graph construction**: Project/Folder/File/Module/Package nodes, symbol QNs, docs/ADR/diagram
    nodes, config keys, routes, infra nodes and relationships.
 5. **Resolution**: imports map local names to modules/packages; calls and usages are scored by
@@ -216,7 +218,7 @@ Git history returns `run_all`. The publisher writes an artifact + coverage + SHA
 ## 9. MCP and CLI
 
 The MCP server is a compact JSON-RPC 2.0 implementation over stdio (newline-delimited; also accepts
-Content-Length framing). It exposes 17 tools, two prompts, protocol negotiation, tool annotations,
+Content-Length framing). It exposes 18 tools, two prompts, protocol negotiation, tool annotations,
 `alwaysLoad` metadata for the discovery trio, and `all` / `analysis` / `scout` profiles. The
 default output is compact JSON; `format:"json"` pretty-prints it. `max_output_tokens` is enforced as
 a deterministic 4-bytes/token ceiling with whole-row truncation and continuation metadata.
@@ -228,7 +230,55 @@ and project counts.
 
 Every tool is callable as `gry cli <tool>`, with schema-aware flag parsing, `--args-file` and stdin.
 The CLI also provides first-class index/search/trace/snippet/outline/query/architecture/coverage/
-changes/ADR/traces/compare/watch/test-impact/config/install commands.
+changes/context/hook/ADR/traces/compare/watch/test-impact/config/install commands.
+
+### 9.1 Bounded task context
+
+`get_task_context` (`gry-query::context`, CLI `gry context`) is a composition layer over existing
+query primitives, not a second graph engine. It resolves targets by QN, name, file or bounded BM25
+search; expands callers, callees, imports, infrastructure and test relationships with
+`Store::trace`; adds change and coverage evidence; and returns a deterministic payload bounded by
+`max_output_tokens` (the same 4-bytes/token ceiling used by MCP rendering).
+
+Every row carries source location, role, distance and provenance:
+
+- `verified` — the index resolved a structural relationship without ambiguity;
+- `declared` — a manifest/configuration declares the relationship (Compose, Kubernetes,
+  Terraform, CI);
+- `inferred` — the resolver was ambiguous or the target came from search relevance;
+- `observed` — runtime traces recorded the call.
+
+Unresolved targets, stale files, coverage gaps, truncation and timeouts are reported separately.
+A successful empty query is distinct from resolution failure (`empty` vs `not_found`). The payload
+never includes source text, environment values, secret values or node properties, and the budget
+enforcer removes whole rows only, recording counts under `budget.omitted`.
+
+Profiles reuse the same assembly path:
+
+- `context` — focused target evidence (default);
+- `scout` — adds a compact map of symbols, files and services plus follow-up queries;
+- `auditor` — adds changed files, checks performed, verified issues, possible risks and missing
+  evidence. It never asserts that a change is safe.
+
+### 9.2 Agent lifecycle hooks
+
+gry does not own an agent runtime. `gry-query::hooks` is a thin adapter that maps four logical
+stages to context requests:
+
+| Stage | Profile | Focus |
+|---|---|---|
+| `before_plan` | scout | architecture, dependencies, services |
+| `before_edit` | context | focused targets, callers/callees, impact candidates |
+| `after_edit` | auditor | changed files, affected relationships, tests |
+| `before_finish` | auditor | unresolved checks, coverage and verification evidence |
+
+The CLI entry point is `gry hook <stage>`; it accepts JSON on stdin and returns a stable envelope
+(`hook`, `context`, `failure`). Hooks are optional and bounded by `timeout_ms` and
+`max_tokens`. A short-lived on-disk cache (keyed by project, generation, stage and inputs) suppresses
+duplicate dispatch; a generation change or a referenced-file edit invalidates it. `GRY_HOOK_ACTIVE` prevents recursive hook
+invocation. When GRY is unavailable or the project is not indexed, the envelope says so explicitly
+and `context` is `null`; it is never presented as a verified empty result. OHGO and other runtimes
+keep planning, permissions, mutation approval and execution.
 
 ## 10. Security and resource bounds
 
@@ -237,7 +287,10 @@ changes/ADR/traces/compare/watch/test-impact/config/install commands.
 - Discovery always excludes the safety core (`.git`, `node_modules`, worktrees) even when a user
   ignore file tries to re-include it.
 - Configuration values are stored, not secrets: config keys and environment variable names are
-  indexed without their values.
+  indexed without their values. Bounded context returns symbol/file/relationship metadata, never
+  source text, environment values or secret/config contents.
+- Lifecycle hooks carry evidence only. They cannot grant mutation permissions, and the consuming
+  runtime keeps planning, approval and execution.
 - Indexing uses a bounded worker pool (`GRY_WORKERS`, default `min(8, cores)`), batched SQLite
   writes, a soft memory budget (`GRY_MAX_INDEX_MEMORY_MB`) and per-run file/source limits.
 - Output is bounded per call; traversal depth is capped; result pages report `has_more` and totals.
@@ -257,6 +310,8 @@ Targets for the reference environment are recorded with measured results in
 | MCP structural query | < 50 ms p50 / < 200 ms p95 on a 100k-node project |
 | Graph traversal depth 3 | < 50 ms p50 |
 | Impact analysis | < 500 ms p50 on 10k files |
+| Bounded task context | < 50 ms p50 at depth 2 on a 10k-node project |
+| Hook overhead (warm cache) | < 15 ms p50, no extra graph work |
 | Peak RSS full index | < 1.5 GB per 100k files with 500k nodes |
 | Idle CPU | ~0% with no watcher; watcher ≤ 1% average on 10k files |
 | Cancellation | < 2 s between files/passes |

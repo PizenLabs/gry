@@ -78,6 +78,10 @@ enum Command {
     Coverage(CoverageCmd),
     /// Detect change impact.
     Changes(ChangesCmd),
+    /// Assemble bounded task context.
+    Context(ContextCmd),
+    /// Run one agent lifecycle hook.
+    Hook(HookCmd),
     /// Manage the ADR.
     Adr(AdrCmd),
     /// Ingest runtime traces.
@@ -274,6 +278,56 @@ struct ChangesCmd {
     base_branch: Option<String>,
     #[arg(long)]
     since: Option<String>,
+}
+
+#[derive(Args)]
+struct ContextCmd {
+    project: String,
+    #[arg(long)]
+    task: Option<String>,
+    #[arg(long = "target")]
+    targets: Vec<String>,
+    #[arg(long, default_value = "context")]
+    profile: String,
+    #[arg(long, default_value_t = 2)]
+    depth: usize,
+    #[arg(long = "max-nodes", default_value_t = 40)]
+    max_nodes: usize,
+    #[arg(long = "max-tokens", default_value_t = 3200)]
+    max_tokens: usize,
+    #[arg(long = "include")]
+    include: Vec<String>,
+    #[arg(long = "changed-path")]
+    changed_paths: Vec<String>,
+    #[arg(long = "expected-generation")]
+    expected_generation: Option<String>,
+    #[arg(long = "timeout-ms", default_value_t = 3000)]
+    timeout_ms: u64,
+}
+
+#[derive(Args)]
+struct HookCmd {
+    stage: String,
+    #[arg(long)]
+    project: Option<String>,
+    #[arg(long)]
+    task: Option<String>,
+    #[arg(long = "target")]
+    targets: Vec<String>,
+    #[arg(long = "changed-path")]
+    changed_paths: Vec<String>,
+    #[arg(long = "task-id")]
+    task_id: Option<String>,
+    #[arg(long = "max-tokens", default_value_t = 3200)]
+    max_tokens: usize,
+    #[arg(long = "timeout-ms", default_value_t = 3000)]
+    timeout_ms: u64,
+    #[arg(long = "no-cache")]
+    no_cache: bool,
+    #[arg(long = "cache-ttl", default_value_t = 30)]
+    cache_ttl_secs: u64,
+    #[arg(long = "args-file")]
+    args_file: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -636,6 +690,27 @@ fn run(cli: &Cli, config: &Config) -> gry_core::GryResult<()> {
             print_value(&gry_query::impact::detect_changes(&store, &req)?);
             Ok(())
         }
+        Command::Context(cmd) => {
+            let store = open_store(config)?;
+            let req = gry_query::context::ContextRequest {
+                project: cmd.project.clone(),
+                task: cmd.task.clone(),
+                targets: cmd.targets.clone(),
+                profile: cmd.profile.clone(),
+                depth: cmd.depth,
+                max_nodes: cmd.max_nodes,
+                max_tokens: cmd.max_tokens,
+                include: cmd.include.clone(),
+                expected_generation: cmd.expected_generation.clone(),
+                changed_paths: cmd.changed_paths.clone(),
+                timeout_ms: cmd.timeout_ms,
+                task_id: None,
+                stage: None,
+            };
+            print_compact(&gry_query::context::get_task_context(&store, &req)?);
+            Ok(())
+        }
+        Command::Hook(cmd) => hook_cmd(config, cmd),
         Command::Adr(cmd) => {
             let store = open_store(config)?;
             let mut updates = Map::new();
@@ -736,6 +811,18 @@ fn run(cli: &Cli, config: &Config) -> gry_core::GryResult<()> {
 fn open_store(config: &Config) -> gry_core::GryResult<Store> {
     config.ensure_dirs()?;
     Store::open(&config.db_path)
+}
+
+/// Machine-facing payloads (context and hooks) are always compact so the
+/// declared `max_output_tokens` ceiling also bounds CLI output.
+fn print_compact(value: &Value) {
+    if QUIET_OUTPUT.load(Ordering::Relaxed) {
+        return;
+    }
+    println!(
+        "{}",
+        serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string())
+    );
 }
 
 fn print_value(value: &Value) {
@@ -1782,6 +1869,122 @@ fn uninstall_client(client: &str, path: &Path, dry_run: bool) -> gry_core::GryRe
     Ok(json!({"client": client, "path": path, "status": "removed"}))
 }
 
+fn hook_cmd(config: &Config, cmd: &HookCmd) -> gry_core::GryResult<()> {
+    use std::io::IsTerminal;
+    let mut input = Map::new();
+    if let Some(path) = &cmd.args_file {
+        if let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&std::fs::read(path)?) {
+            input = map;
+        }
+    }
+    if !std::io::stdin().is_terminal() {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        if !buf.trim().is_empty() {
+            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&buf) {
+                for (key, value) in map {
+                    input.insert(key, value);
+                }
+            }
+        }
+    }
+    let project = cmd
+        .project
+        .clone()
+        .or_else(|| {
+            input
+                .get("project")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    if project.is_empty() {
+        return Err(gry_core::GryError::invalid(
+            "project is required (use --project or a JSON input)",
+        ));
+    }
+    let task = cmd.task.clone().or_else(|| {
+        input
+            .get("task")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    let targets = if cmd.targets.is_empty() {
+        input
+            .get("targets")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        cmd.targets.clone()
+    };
+    let changed_paths = if cmd.changed_paths.is_empty() {
+        input
+            .get("changed_paths")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        cmd.changed_paths.clone()
+    };
+    let task_id = cmd.task_id.clone().or_else(|| {
+        input
+            .get("task_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    let max_tokens = input
+        .get("max_tokens")
+        .or_else(|| input.get("max_output_tokens"))
+        .and_then(Value::as_u64)
+        .map(|v| v as usize)
+        .unwrap_or(cmd.max_tokens);
+    let timeout_ms = input
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(cmd.timeout_ms);
+    let req = gry_query::hooks::HookRequest {
+        stage: cmd.stage.clone(),
+        project,
+        task,
+        targets,
+        changed_paths,
+        task_id,
+        max_tokens: max_tokens.clamp(128, 1_000_000),
+        timeout_ms: timeout_ms.clamp(1, 30_000),
+        cache: !cmd.no_cache,
+        cache_ttl_secs: cmd.cache_ttl_secs,
+    };
+    let store = open_store(config)?;
+    let guard = gry_query::hooks::hook_guard_active();
+    if guard {
+        print_compact(&gry_query::hooks::run_hook(
+            &store,
+            &req,
+            Some(&config.cache_dir),
+        )?);
+        return Ok(());
+    }
+    // Guard nested invocations for any process this hook starts.
+    std::env::set_var("GRY_HOOK_ACTIVE", "1");
+    let out = gry_query::hooks::run_hook_after_guard_check(&store, &req, Some(&config.cache_dir))?;
+    std::env::remove_var("GRY_HOOK_ACTIVE");
+    print_compact(&out);
+    Ok(())
+}
+
 fn skill_cmd(cmd: &SkillCmd) -> gry_core::GryResult<()> {
     let skill = r#"---
 name: gry
@@ -1799,8 +2002,13 @@ exploration for structural questions.
 - `query_graph` — read-only Cypher for multi-hop or aggregate questions.
 - `get_architecture` — languages, packages, entry points, routes, hotspots, cycles.
 - `search_code` — literal/regex text search with graph context.
+- `get_task_context` — bounded, provenance-labeled evidence for a task (context/scout/auditor).
 - `detect_changes` — map a diff to affected symbols and tests.
 - `check_index_coverage` — verify a cited file was actually indexed; clean is not proof of completeness.
+
+Lifecycle adapters can call `gry hook <stage>` (before_plan, before_edit, after_edit,
+before_finish) with JSON on stdin. Treat `not_indexed`, `timeout`, `stale` and `not_found` as
+explicit failures, not empty results.
 
 Paginate with the returned offsets/cursors. Use `search_code` or grep for
 literal text, configuration values, comments and non-code files. If a result is

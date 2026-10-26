@@ -442,7 +442,7 @@ mod tests {
         assert_eq!(first["result"]["tools"].as_array().unwrap().len(), 6);
         assert_eq!(first["result"]["nextCursor"], "6");
         let all = all_tools(&mut server);
-        assert_eq!(all.len(), 17);
+        assert_eq!(all.len(), 18);
         let names: Vec<&str> = all.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(names.contains(&"query_graph"));
         assert!(names.contains(&"ingest_traces"));
@@ -474,7 +474,7 @@ mod tests {
             .unwrap()
             .contains("search_graph"));
         let tools = all_tools(&mut server);
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 18);
         assert!(tools.iter().any(|t| t["name"] == "query_graph"));
     }
 
@@ -496,6 +496,25 @@ mod tests {
         assert!(!names.contains(&"index_repository"));
         assert!(!names.contains(&"delete_project"));
         assert!(names.contains(&"search_graph"));
+    }
+
+    #[test]
+    fn scout_profile_exposes_task_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            cache_dir: dir.path().join("cache"),
+            db_path: dir.path().join("cache/graph.db"),
+            allowed_root: None,
+            workers: 1,
+            max_files: None,
+            max_source_mb: None,
+            settings: gry_core::config::RuntimeSettings::default(),
+        };
+        let mut server = Server::new(config, ToolProfile::Scout);
+        let tools = all_tools(&mut server);
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"get_task_context"));
+        assert!(!names.contains(&"detect_changes"));
     }
 
     #[test]

@@ -48,7 +48,7 @@ fn index_search_status_config_and_delete() {
         &cache,
         &["index", root.to_str().unwrap(), "--name", "cli-fixture"],
     );
-    assert_eq!(index["nodes"].as_i64().unwrap() > 5, true);
+    assert!(index["nodes"].as_i64().unwrap() > 5);
     let search = run(
         &cache,
         &["search", "cli-fixture", "parse", "--label", "Method"],
@@ -221,6 +221,12 @@ fn install_auto_detects_configured_harnesses() {
     fs::write(home.path().join(".claude.json"), "{}").unwrap();
     fs::create_dir_all(home.path().join(".config/opencode")).unwrap();
     fs::write(home.path().join(".config/opencode/opencode.json"), "{}").unwrap();
+    fs::create_dir_all(home.path().join(".omp/agent")).unwrap();
+    fs::write(
+        home.path().join(".omp/agent/mcp.json"),
+        "{\"mcpServers\":{}}",
+    )
+    .unwrap();
 
     let output = Command::new(bin())
         .env("HOME", home.path())
@@ -244,6 +250,7 @@ fn install_auto_detects_configured_harnesses() {
         .collect();
     assert!(configured.contains(&"claude"), "{value}");
     assert!(configured.contains(&"opencode"), "{value}");
+    assert!(configured.contains(&"omp"), "{value}");
 
     let claude: Value =
         serde_json::from_slice(&fs::read(home.path().join(".claude.json")).unwrap()).unwrap();
@@ -253,6 +260,11 @@ fn install_auto_detects_configured_harnesses() {
     )
     .unwrap();
     assert_eq!(opencode["mcp"]["gry"]["command"][1], "serve");
+    let omp: Value =
+        serde_json::from_slice(&fs::read(home.path().join(".omp/agent/mcp.json")).unwrap())
+            .unwrap();
+    assert_eq!(omp["mcpServers"]["gry"]["type"], "stdio");
+    assert_eq!(omp["mcpServers"]["gry"]["args"][0], "serve");
     assert!(!home.path().join(".codex/config.toml").exists());
 
     let output = Command::new(bin())
@@ -271,6 +283,10 @@ fn install_auto_detects_configured_harnesses() {
     )
     .unwrap();
     assert!(opencode["mcp"].get("gry").is_none());
+    let omp: Value =
+        serde_json::from_slice(&fs::read(home.path().join(".omp/agent/mcp.json")).unwrap())
+            .unwrap();
+    assert!(omp["mcpServers"].get("gry").is_none());
 }
 
 #[test]
@@ -279,6 +295,12 @@ fn install_skill_targets_detected_harnesses() {
     fs::write(home.path().join(".claude.json"), "{}").unwrap();
     fs::create_dir_all(home.path().join(".config/opencode")).unwrap();
     fs::write(home.path().join(".config/opencode/opencode.json"), "{}").unwrap();
+    fs::create_dir_all(home.path().join(".omp/agent")).unwrap();
+    fs::write(
+        home.path().join(".omp/agent/mcp.json"),
+        "{\"mcpServers\":{}}",
+    )
+    .unwrap();
 
     let output = Command::new(bin())
         .env("HOME", home.path())
@@ -297,6 +319,7 @@ fn install_skill_targets_detected_harnesses() {
         .path()
         .join(".config/opencode/skills/gry/SKILL.md")
         .exists());
+    assert!(home.path().join(".omp/agent/skills/gry/SKILL.md").exists());
     assert!(home.path().join(".config/gry/SKILL.md").exists());
 }
 
@@ -317,10 +340,11 @@ fn install_all_configures_every_client() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["status"], "configured");
-    assert_eq!(value["configured"].as_array().unwrap().len(), 17);
+    assert_eq!(value["configured"].as_array().unwrap().len(), 18);
     assert_eq!(value["failed"].as_array().unwrap().len(), 0);
     assert!(home.path().join(".codex/config.toml").exists());
     assert!(home.path().join(".cursor/mcp.json").exists());
+    assert!(home.path().join(".omp/agent/mcp.json").exists());
     if cfg!(target_os = "macos") {
         assert!(home
             .path()

@@ -108,7 +108,10 @@ fn semantic_architecture_trace_and_coverage() {
     )
     .unwrap();
     assert!(arch["languages"].as_array().unwrap().len() >= 2);
-    assert!(arch["clusters"]["communities"].as_array().unwrap().len() >= 1);
+    assert!(!arch["clusters"]["communities"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     assert!(arch["routes"]
         .as_array()
         .unwrap()
@@ -128,7 +131,7 @@ fn semantic_architecture_trace_and_coverage() {
         },
     )
     .unwrap();
-    assert!(code["results"].as_array().unwrap().len() >= 1);
+    assert!(!code["results"].as_array().unwrap().is_empty());
     assert!(code["results"][0]["matches"][0]["context_start"].is_number());
     let files = search_code(
         &store,

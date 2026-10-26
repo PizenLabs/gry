@@ -39,7 +39,7 @@ pub fn manage_adr(store: &Store, req: &AdrRequest) -> gry_core::GryResult<Value>
                 "headings_total": total,
                 "headings": page,
                 "has_more": req.section_offset + page.len() < total,
-                "content": if content.is_empty() { Value::Null } else { Value::Null },
+                "content": Value::Null,
             }))
         }
         "get" => {
@@ -168,7 +168,7 @@ fn parse_heading(line: &str) -> Option<(u32, String)> {
         return None;
     }
     let level = trimmed.chars().take_while(|c| *c == '#').count() as u32;
-    if level < 2 || level > 6 {
+    if !(2..=6).contains(&level) {
         return None;
     }
     let rest = trimmed[level as usize..].trim();

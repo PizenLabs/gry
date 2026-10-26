@@ -1203,6 +1203,11 @@ fn resolve_infra_qn(
     }
     if let Some(path) = qn.strip_prefix(FILE_PREFIX) {
         let path = path.trim_start_matches('/');
+        if path.contains("...") || path.contains('*') || path.contains('?') || path.contains('[') {
+            // A shell glob is not a concrete file; do not materialize a
+            // placeholder File node for it.
+            return None;
+        }
         if let Some(file_qn) = builder.file_for(path) {
             return Some(file_qn.clone());
         }

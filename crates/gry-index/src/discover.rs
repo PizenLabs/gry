@@ -165,6 +165,15 @@ const BUILTIN_DIRS: &[&str] = &[
     ".history",
     ".nyc_output",
     ".coverage",
+    // Agent runtime state. These are transcripts, checkpoints and caches, not
+    // repository source; indexing them dominates symbol and search results.
+    ".ohgo",
+    ".izen",
+    ".crush",
+    ".aider",
+    ".codex",
+    ".claude",
+    ".cursor",
 ];
 
 const FAST_EXTRA_DIRS: &[&str] = &[
@@ -519,19 +528,52 @@ fn build_gitignore(base: &Path, file: &Path) -> Option<Gitignore> {
 }
 
 fn global_gitignore() -> Option<Gitignore> {
-    let home = std::env::var_os("HOME")?;
+    let home = std::env::var_os("HOME");
     let xdg = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(&home).join(".config"));
-    let path = xdg.join("git").join("ignore");
-    if !path.is_file() {
-        return None;
-    }
+        .or_else(|| home.as_ref().map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"));
     let mut builder = GitignoreBuilder::new("/");
-    if builder.add(&path).is_some() {
+    let mut added = false;
+    let mut candidates = Vec::new();
+    if let Some(path) = git_excludes_file() {
+        candidates.push(path);
+    }
+    candidates.push(xdg.join("git").join("ignore"));
+    if let Some(home) = &home {
+        candidates.push(PathBuf::from(home).join(".gitignore_global"));
+    }
+    for path in candidates {
+        if path.is_file() && builder.add(&path).is_none() {
+            added = true;
+        }
+    }
+    if added {
+        builder.build().ok()
+    } else {
+        None
+    }
+}
+
+/// Resolve Git's configured global excludes file. `core.excludesFile` is the
+/// authoritative location; the XDG default is only a fallback.
+fn git_excludes_file() -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["config", "--get", "core.excludesFile"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
         return None;
     }
-    builder.build().ok()
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        let home = std::env::var_os("HOME")?;
+        return Some(PathBuf::from(home).join(rest));
+    }
+    Some(PathBuf::from(raw))
 }
 
 fn git_ignored(rules: &[(PathBuf, Gitignore)], root: &Path, rel: &str, is_dir: bool) -> bool {
@@ -634,6 +676,17 @@ mod tests {
             || p.starts_with("build/")
             || p.starts_with("target/")
             || p.starts_with("node_modules/")));
+    }
+
+    #[test]
+    fn agent_state_directories_are_builtin_ignored() {
+        for name in [".ohgo", ".izen", ".crush", ".aider", ".codex", ".claude"] {
+            assert!(
+                builtin_dir(name, IndexMode::Full),
+                "{name} must be ignored by default"
+            );
+        }
+        assert!(!builtin_dir("internal", IndexMode::Full));
     }
 
     #[test]

@@ -4,6 +4,7 @@ use gry_store::Store;
 use serde_json::{json, Value};
 use std::path::Path;
 
+#[allow(clippy::too_many_arguments)]
 pub fn check_index_coverage(
     store: &Store,
     project: &str,

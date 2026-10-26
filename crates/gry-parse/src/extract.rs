@@ -341,13 +341,7 @@ impl<'a> Extractor<'a> {
                     .to_string();
                 let label = match head.as_str() {
                     "defmodule" => "Module",
-                    "def" | "defp" | "defmacro" | "defmacrop" => {
-                        if in_function {
-                            "Function"
-                        } else {
-                            "Function"
-                        }
-                    }
+                    "def" | "defp" | "defmacro" | "defmacrop" => "Function",
                     _ => return false,
                 };
                 let Some(args) = node.child_by_field_name("arguments") else {
@@ -429,7 +423,7 @@ impl<'a> Extractor<'a> {
                 def.params = extract_params(rhs, self.source);
                 def.docstring = preceding_docstring(self.source, node, "r");
                 self.defs.push(def);
-                return true;
+                true
             }
             _ => false,
         }
@@ -661,11 +655,24 @@ impl<'a> Extractor<'a> {
     fn record_call_signals(&mut self, call: &CallSite) {
         let name = call.name.as_str();
         let lower = name.to_ascii_lowercase();
-        // Environment reads.
+        // Environment reads. A bare `get` is not an environment read: in Go
+        // `r.GET("/")` is a route, and in Rust `map.get("k")` is a lookup. Only
+        // accept `get` when the receiver names an env/config object.
+        let env_like_receiver = call
+            .receiver
+            .as_deref()
+            .map(|receiver| {
+                let receiver = receiver.to_ascii_lowercase();
+                receiver.contains("env")
+                    || receiver.contains("config")
+                    || receiver.contains("viper")
+                    || receiver.contains("settings")
+            })
+            .unwrap_or(false);
         if matches!(
             lower.as_str(),
             "getenv" | "getenvs" | "getenvironmentvariable" | "var" | "env" | "environ_get"
-        ) || lower == "get"
+        ) || (lower == "get" && env_like_receiver)
         {
             if let Some(arg) = call.args.first() {
                 if let Some(key) = literal_string(arg) {
@@ -1128,8 +1135,7 @@ fn simple_type_name(raw: &str) -> String {
     let raw = raw.trim().trim_matches(['&', '*', ' ', '!']);
     let last = raw
         .split(['.', ':', '<', ' ', ',', '>', '[', ']'])
-        .filter(|s| !s.is_empty())
-        .last()
+        .rfind(|s| !s.is_empty())
         .unwrap_or(raw);
     last.to_string()
 }
@@ -1161,8 +1167,7 @@ fn extract_callable_name(raw: &str) -> String {
     let last = last.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '$');
     if last.is_empty() {
         raw.split(|c: char| !c.is_alphanumeric() && c != '_')
-            .filter(|s| !s.is_empty())
-            .last()
+            .rfind(|s| !s.is_empty())
             .unwrap_or("")
             .to_string()
     } else {
@@ -1273,9 +1278,10 @@ fn receiver_text(raw: &str, name: &str) -> Option<String> {
     let idx = raw.rfind(name)?;
     let before = raw[..idx].trim_end_matches(['.', ':', '-', '>', '?', '!', ' ']);
     let before = before.trim();
-    if before.is_empty() || matches!(before, "return" | "await" | "new") {
-        None
-    } else if before.contains(' ') && !before.contains('.') {
+    if before.is_empty()
+        || matches!(before, "return" | "await" | "new")
+        || (before.contains(' ') && !before.contains('.'))
+    {
         None
     } else {
         Some(before.to_string())
@@ -1466,12 +1472,10 @@ fn function_body<'a>(node: Node<'a>) -> Option<Node<'a>> {
 
 fn find_child_kind<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
     let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if kinds.contains(&child.kind()) {
-            return Some(child);
-        }
-    }
-    None
+    let found = node
+        .named_children(&mut cursor)
+        .find(|child| kinds.contains(&child.kind()));
+    found
 }
 
 fn compute_profile(body: Node<'_>, source: &[u8], params: &[String]) -> AstProfile {
@@ -1528,9 +1532,7 @@ fn compute_profile(body: Node<'_>, source: &[u8], params: &[String]) -> AstProfi
             stack.push((child, if is_branch { depth + 1 } else { depth }));
         }
     }
-    if depth_count > 0 {
-        profile.avg_nesting_depth_x10 = (depth_sum * 10) / depth_count;
-    }
+    profile.avg_nesting_depth_x10 = (depth_sum * 10).checked_div(depth_count).unwrap_or(0);
     profile.unique_operators =
         profile.arithmetic_ops + profile.logical_ops + profile.comparison_ops;
     profile.unique_operands = profile.body_tokens.saturating_sub(profile.unique_operators);
@@ -1540,6 +1542,12 @@ fn compute_profile(body: Node<'_>, source: &[u8], params: &[String]) -> AstProfi
 }
 
 fn is_import_node(kind: &str, lang: &str) -> bool {
+    // Go's tree has import_declaration -> import_spec_list -> import_spec.
+    // Only the leaf is one import; parsing the containers as well duplicates
+    // the whole block as a pseudo-package.
+    if lang == "go" {
+        return kind == "import_spec";
+    }
     let generic = kind.contains("import")
         || kind.contains("include")
         || kind.contains("require")
@@ -1561,6 +1569,9 @@ fn is_import_node(kind: &str, lang: &str) -> bool {
 fn parse_import(node: Node<'_>, source: &[u8], lang: &str) -> Option<Import> {
     let raw = text(source, node).trim();
     if raw.is_empty() {
+        return None;
+    }
+    if lang == "go" && node.kind() != "import_spec" {
         return None;
     }
     let line = line(node);
@@ -1679,12 +1690,11 @@ fn parse_import(node: Node<'_>, source: &[u8], lang: &str) -> Option<Import> {
             .trim_end_matches(';')
             .trim();
         let local = body
-            .split(" as ")
-            .last()
+            .rsplit(" as ")
+            .next()
             .unwrap_or(body)
             .split([':', '{', ','])
-            .filter(|s| !s.trim().is_empty() && *s != "self" && *s != "super" && *s != "crate")
-            .last()
+            .rfind(|s| !s.trim().is_empty() && *s != "self" && *s != "super" && *s != "crate")
             .unwrap_or(body)
             .trim()
             .to_string();
@@ -2610,6 +2620,66 @@ function getUser(req, res) {
             .iter()
             .any(|r| r.method == "GET" && r.path == "/users/:id"));
         assert!(out.http_calls.iter().any(|h| h.url_path == "/api/users/"));
+    }
+
+    #[test]
+    fn go_http_methods_are_not_environment_reads() {
+        let src = r#"
+package server
+
+import "github.com/gin-gonic/gin"
+
+func (s *Server) RegisterRoutes() {
+    r := gin.Default()
+    r.GET("/health", s.healthHandler)
+}
+"#;
+        let out = extract("internal/server/routes.go", src);
+        assert!(
+            !out.env_accesses.iter().any(|env| env.key == "/health"),
+            "r.GET(\"/health\") must not be recorded as an environment read"
+        );
+    }
+
+    #[test]
+    fn go_getenv_is_an_environment_read() {
+        let src = "package main\n\nimport \"os\"\n\nfunc main() { _ = os.Getenv(\"PORT\") }\n";
+        let out = extract("cmd/api/main.go", src);
+        assert!(out.env_accesses.iter().any(|env| env.key == "PORT"));
+    }
+
+    #[test]
+    fn rust_map_get_is_not_an_environment_read() {
+        let src = "fn lookup(map: &std::collections::HashMap<String, String>) { let _ = map.get(\"host\"); }\n";
+        let out = extract("src/lib.rs", src);
+        assert!(
+            !out.env_accesses.iter().any(|env| env.key == "host"),
+            "map.get(\"host\") must not be recorded as an environment read"
+        );
+    }
+
+    #[test]
+    fn go_grouped_imports_are_not_one_import_block() {
+        let src = r#"
+package server
+
+import (
+    "context"
+    "go-template/internal/database"
+)
+"#;
+        let out = extract("internal/server/routes.go", src);
+        assert!(
+            out.imports
+                .iter()
+                .all(|import| !import.specifier.contains('\n')),
+            "grouped import block was parsed as a single specifier"
+        );
+        assert!(out
+            .imports
+            .iter()
+            .any(|import| import.specifier == "go-template/internal/database"));
+        assert_eq!(out.imports.len(), 2);
     }
 
     #[test]

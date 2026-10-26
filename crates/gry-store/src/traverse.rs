@@ -121,9 +121,11 @@ impl Store {
                 if !visited.insert(neighbor_id) {
                     continue;
                 }
-                if !node_cache.contains_key(&neighbor_id) {
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    node_cache.entry(neighbor_id)
+                {
                     if let Some(node) = self.node_by_id(&params.project, neighbor_id)? {
-                        node_cache.insert(neighbor_id, node);
+                        entry.insert(node);
                     }
                 }
                 let Some(neighbor) = node_cache.get(&neighbor_id) else {

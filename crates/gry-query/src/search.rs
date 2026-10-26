@@ -35,6 +35,10 @@ pub struct GraphSearchRequest {
 }
 
 pub fn search_graph(store: &Store, req: &GraphSearchRequest) -> gry_core::GryResult<Value> {
+    // Match the other readers: an unknown project is an error, not an empty
+    // result. Silent zeroes make an unindexed repository look like a repository
+    // with no symbols.
+    store.require_project(&req.project)?;
     let mut structural = None;
     let mut total = 0i64;
     if let Some(query) = req.query.as_deref().filter(|q| !q.is_empty()) {
@@ -408,7 +412,7 @@ pub fn search_code(store: &Store, req: &SearchCodeRequest) -> gry_core::GryResul
             .map(|(idx, line)| {
                 let symbol = symbols
                     .iter()
-                    .filter(|n| n.start_line as usize <= idx + 1 && n.end_line as usize >= idx + 1)
+                    .filter(|n| n.start_line as usize <= *idx + 1 && n.end_line as usize > *idx)
                     .max_by_key(|n| n.start_line)
                     .map(|n| {
                         json!({
@@ -761,6 +765,20 @@ mod tests {
         let out = search_graph(&store, &req).unwrap();
         assert!(out["total"].as_i64().unwrap() >= 4);
         assert!(out["results"].as_array().unwrap().len() <= 2);
+    }
+
+    #[test]
+    fn unknown_project_is_an_error() {
+        let store = test_store();
+        let req = GraphSearchRequest {
+            project: "not-indexed".into(),
+            ..Default::default()
+        };
+        let err = search_graph(&store, &req).unwrap_err();
+        assert!(
+            err.to_string().contains("project not found or not indexed"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

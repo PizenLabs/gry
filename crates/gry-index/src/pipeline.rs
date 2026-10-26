@@ -35,7 +35,10 @@ macro_rules! phase {
     };
 }
 
-pub const EXTRACTOR_VERSION: &str = "25";
+// Bump whenever extraction or resolution semantics change in a way that
+// existing graphs cannot represent. A mismatch forces a clean rebuild instead
+// of a delta that would preserve stale edges.
+pub const EXTRACTOR_VERSION: &str = "26";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexRequest {
@@ -170,6 +173,20 @@ impl Indexer {
         let t = Instant::now();
         let discovery = discover(&root, &discover_options, &known_hashes, &cancel)?;
         phase!("discovery", t);
+        // Reconcile nodes for files that are no longer part of the project
+        // (deleted, newly ignored, or left by an earlier generation). This
+        // must run before the unchanged fast path, which would otherwise keep
+        // a polluted graph forever.
+        if existing.is_some() {
+            let t_prune = Instant::now();
+            let pruned = store.prune_orphan_nodes(&project)?;
+            if pruned > 0 {
+                phase!("prune_orphans", t_prune);
+                if timing_enabled() {
+                    eprintln!("[gry] pruned {pruned} orphan file paths");
+                }
+            }
+        }
         if cancel.load(Ordering::Relaxed) {
             return Err(gry_core::GryError::Cancelled);
         }
@@ -270,8 +287,8 @@ impl Indexer {
         if let Some(existing) = &existing {
             if timing_enabled() {
                 eprintln!(
-                    "[gry] delta check existing={} extractor_ok={} mode_changed={} version={}/{} changed={} deleted={}",
-                    true, extractor_ok, mode_changed, existing.index_version, gry_store::FORMAT_VERSION,
+                    "[gry] delta check existing=true extractor_ok={} mode_changed={} version={}/{} changed={} deleted={}",
+                    extractor_ok, mode_changed, existing.index_version, gry_store::FORMAT_VERSION,
                     changed.len(), deleted.len()
                 );
             }

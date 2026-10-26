@@ -35,6 +35,7 @@ impl GraphBuilder {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_node(
         &mut self,
         label: &str,
@@ -73,7 +74,9 @@ impl GraphBuilder {
                     }
                 }
             }
-            if existing.file_path != file_path && !file_path.is_empty() && existing.file_path != ""
+            if existing.file_path != file_path
+                && !file_path.is_empty()
+                && !existing.file_path.is_empty()
             {
                 let variant = serde_json::json!({
                     "file_path": file_path,

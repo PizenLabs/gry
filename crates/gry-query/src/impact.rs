@@ -311,6 +311,9 @@ pub fn detect_changes(store: &Store, req: &DetectChangesRequest) -> gry_core::Gr
             "returned": changed_page.len(),
             "offset": req.changed_offset,
             "has_more": req.changed_offset + changed_page.len() < changed_total,
+            "next_offset": if req.changed_offset + changed_page.len() < changed_total {
+                Some(req.changed_offset + changed_page.len())
+            } else { None },
             "rows": changed_page,
         },
         "seeds": {
@@ -318,6 +321,9 @@ pub fn detect_changes(store: &Store, req: &DetectChangesRequest) -> gry_core::Gr
             "returned": seed_rows.len(),
             "offset": req.seed_offset,
             "has_more": req.seed_offset + seed_rows.len() < seeds.len(),
+            "next_offset": if req.seed_offset + seed_rows.len() < seeds.len() {
+                Some(req.seed_offset + seed_rows.len())
+            } else { None },
             "rows": seed_rows,
         },
         "impact": {
@@ -508,9 +514,31 @@ fn changed_files(
             file.hunks.clear();
         }
     }
+    // Runtime state is not a repository change. The index already excludes
+    // these directories; the Git view must agree with it.
+    out.retain(|file| !is_runtime_state_path(&file.path));
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out.truncate(2000);
     Ok(out)
+}
+
+fn is_runtime_state_path(path: &str) -> bool {
+    let top = path.split('/').next().unwrap_or(path);
+    matches!(
+        top,
+        ".git"
+            | ".ohgo"
+            | ".izen"
+            | ".crush"
+            | ".aider"
+            | ".codex"
+            | ".claude"
+            | ".cursor"
+            | "node_modules"
+            | "target"
+            | ".venv"
+            | "__pycache__"
+    )
 }
 
 fn parse_name_status(out: &str, files: &mut BTreeMap<String, ChangedFile>) {
@@ -586,4 +614,18 @@ fn run_git(root: &Path, args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_state_paths_are_not_repository_changes() {
+        assert!(is_runtime_state_path(".ohgo/progress.json"));
+        assert!(is_runtime_state_path(".izen/runtime/snapshot.json"));
+        assert!(is_runtime_state_path("node_modules/pkg/index.js"));
+        assert!(!is_runtime_state_path("internal/server/routes.go"));
+        assert!(!is_runtime_state_path("cmd/api/main.go"));
+    }
 }

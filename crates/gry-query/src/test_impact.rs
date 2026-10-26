@@ -383,7 +383,7 @@ fn glob_match(pattern: &str, path: &str) -> bool {
         return true;
     }
     if normalized.ends_with('/') {
-        return glob.is_match(&format!("{path}/"));
+        return glob.is_match(format!("{path}/"));
     }
     false
 }
@@ -432,13 +432,13 @@ fn all_tests(store: &Store, project: &str) -> gry_core::GryResult<Vec<Value>> {
 fn all_suites(store: &Store, project: &str) -> gry_core::GryResult<Vec<Value>> {
     let mut suites: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for node in store.all_nodes(project)? {
-        if node.property_bool("is_test").unwrap_or(false) || is_test_path(&node.file_path) {
-            if labels::is_callable(&node.label) {
-                suites
-                    .entry(node.file_path.clone())
-                    .or_default()
-                    .push(node.qualified_name);
-            }
+        if (node.property_bool("is_test").unwrap_or(false) || is_test_path(&node.file_path))
+            && labels::is_callable(&node.label)
+        {
+            suites
+                .entry(node.file_path.clone())
+                .or_default()
+                .push(node.qualified_name);
         }
     }
     Ok(suites

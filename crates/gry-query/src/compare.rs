@@ -82,8 +82,8 @@ pub fn compare_graphs(
         .filter(|(k, _)| !target_edge_set.contains_key(*k))
         .map(|(_, e)| *e)
         .collect();
-    edges_added.sort_by(|a, b| edge_key(a, &target_ids).cmp(&edge_key(b, &target_ids)));
-    edges_removed.sort_by(|a, b| edge_key(a, &base_ids).cmp(&edge_key(b, &base_ids)));
+    edges_added.sort_by_key(|a| edge_key(a, &target_ids));
+    edges_removed.sort_by_key(|a| edge_key(a, &base_ids));
 
     let node_added_total = nodes_added.len();
     let node_removed_total = nodes_removed.len();

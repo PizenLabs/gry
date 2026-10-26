@@ -205,6 +205,7 @@ impl Store {
     }
 
     /// BM25 full-text search over the current project.
+    #[allow(clippy::too_many_arguments)]
     pub fn bm25(
         &self,
         project: &str,

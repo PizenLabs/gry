@@ -67,11 +67,11 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "search_graph",
-            description: "Find symbols via BM25 query, regex name/qn filters, or semantic_query. Rows keep qn/file/lines and in/out degree.",
+            description: "Find symbols by name or text. Use name_pattern for an exact/known identifier; query is broad BM25. Rows keep qn/file/lines/degree, with production code ranked before mocks and tests. Prefer get_task_context for multi-part structural tasks.",
             schema: json!({
                 "type":"object",
                 "properties":{
-                    "project":{"type":"string"},
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "query":{"type":"string"},
                     "label":{"type":"string"},
                     "name_pattern":{"type":"string"},
@@ -94,7 +94,6 @@ pub fn tools() -> Vec<ToolDef> {
                     "fields":{"type":"array","items":{"type":"string"}},
                     "detail":{"type":"string","enum":["ids","default"],"default":"default"}
                 },
-                "required":["project"]
             }),
             read_only: true,
             destructive: false,
@@ -104,12 +103,12 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "query_graph",
-            description: "Read-only Cypher for multi-hop, aggregation, complexity, or cross-service analysis. Default 200 visible rows with exact totals and continuations.",
+            description: "Read-only Cypher for multi-hop or aggregate questions that search/trace cannot express. Default 200 rows with exact totals and continuation.",
             schema: json!({
                 "type":"object",
                 "properties":{
                     "query":{"type":"string"},
-                    "project":{"type":"string"},
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "graph":{"type":"string","enum":["code","missed"],"default":"code"},
                     "max_rows":{"type":"integer","minimum":0,"default":200},
                     "offset":{"type":"integer","minimum":0,"default":0},
@@ -117,7 +116,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "max_output_tokens":{"type":"integer","minimum":128,"maximum":1000000},
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"}
                 },
-                "required":["query","project"]
+                "required":["query"]
             }),
             read_only: true,
             destructive: false,
@@ -127,12 +126,12 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "trace_path",
-            description: "Trace callers/callees, data flow, cross-service, topology, deploy or run paths. Depth 1-15; tests excluded by default.",
+            description: "Trace callers/callees or infrastructure paths from one symbol. Accepts a QN, unique suffix, or Type.Method; an ambiguous short name returns candidates instead of guessing. Returns relationships and ranges, not source.",
             schema: json!({
                 "type":"object",
                 "properties":{
                     "function_name":{"type":"string"},
-                    "project":{"type":"string"},
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "direction":{"type":"string","enum":["inbound","outbound","both"],"default":"both"},
                     "depth":{"type":"integer","default":3,"minimum":1,"maximum":15},
                     "limit":{"type":"integer","default":100,"minimum":1,"maximum":5000},
@@ -146,7 +145,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"},
                     "include_evidence":{"type":"boolean","default":false}
                 },
-                "required":["function_name","project"]
+                "required":["function_name"]
             }),
             read_only: true,
             destructive: false,
@@ -156,12 +155,12 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "get_code_snippet",
-            description: "Read a search_graph symbol. auto bounds source and outlines large containers; full restores source.",
+            description: "Read one symbol's exact source by qualified name. Use after search_graph/get_task_context for material claims; do not re-run discovery. auto bounds source, full restores it, outline lists members.",
             schema: json!({
                 "type":"object",
                 "properties":{
                     "qualified_name":{"type":"string"},
-                    "project":{"type":"string"},
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "include_neighbors":{"type":"boolean","default":false},
                     "source_mode":{"type":"string","enum":["auto","full","outline"],"default":"auto"},
                     "member_limit":{"type":"integer","default":50,"minimum":1,"maximum":500},
@@ -171,7 +170,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "max_output_tokens":{"type":"integer","minimum":128,"maximum":1000000},
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"}
                 },
-                "required":["qualified_name","project"]
+                "required":["qualified_name"]
             }),
             read_only: true,
             destructive: false,
@@ -185,7 +184,7 @@ pub fn tools() -> Vec<ToolDef> {
             schema: json!({
                 "type":"object",
                 "properties":{
-                    "project":{"type":"string"},
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "file_path":{"type":"string"},
                     "labels":{"type":"array","items":{"type":"string"},"maxItems":16},
                     "limit":{"type":"integer","minimum":1,"maximum":200,"default":100},
@@ -193,7 +192,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"}
                 },
                 "additionalProperties":false,
-                "required":["project","file_path"]
+                "required":["file_path"]
             }),
             read_only: true,
             destructive: false,
@@ -203,17 +202,16 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "get_graph_schema",
-            description: "Get node-label and edge-type counts, relationship patterns and (diagnostics=full) queryable properties.",
+            description: "Node/edge counts and queryable properties. Use only to author query_graph, not as a discovery or setup step.",
             schema: json!({
                 "type":"object",
                 "properties":{
-                    "project":{"type":"string"},
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"},
                     "diagnostics":{"type":"string","enum":["none","full"],"default":"none"},
                     "limit":{"type":"integer","default":50,"minimum":1,"maximum":500},
                     "offset":{"type":"integer","default":0,"minimum":0}
                 },
-                "required":["project"]
             }),
             read_only: true,
             destructive: false,
@@ -243,18 +241,17 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "get_architecture",
-            description: "Bounded static architecture: overview, structure, dependencies, routes, languages, packages, entry points, hotspots, boundaries, layers, file tree, clusters, cycles.",
+            description: "Bounded architecture summary: structure, dependencies, routes, packages, entry points, hotspots, layers, cycles. Use when the question is about the shape of the system, not one symbol.",
             schema: json!({
                 "type":"object",
                 "properties":{
-                    "project":{"type":"string"},
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "path":{"type":"string","description":"Directory prefix."},
                     "aspects":{"type":"array","items":{"type":"string","enum":["all","overview","structure","dependencies","routes","languages","packages","entry_points","hotspots","boundaries","layers","file_tree","clusters","cycles","system_structure"]}},
                     "expected_generation":{"type":"string","minLength":1},
                     "max_output_tokens":{"type":"integer","default":8000,"minimum":128,"maximum":1000000},
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"}
                 },
-                "required":["project"]
             }),
             read_only: true,
             destructive: false,
@@ -264,12 +261,12 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "search_code",
-            description: "Graph-ranked text search: compact symbols, full bounded source, or file paths.",
+            description: "Graph-ranked literal or regex text search over source and non-code files. Use for exact strings, config values and comments; use search_graph for symbol discovery.",
             schema: json!({
                 "type":"object",
                 "properties":{
                     "pattern":{"type":"string"},
-                    "project":{"type":"string"},
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "file_pattern":{"type":"string"},
                     "path_filter":{"type":"string"},
                     "mode":{"type":"string","enum":["compact","full","files"],"default":"compact"},
@@ -289,7 +286,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "max_output_tokens":{"type":"integer","minimum":128,"maximum":1000000},
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"}
                 },
-                "required":["pattern","project"]
+                "required":["pattern"]
             }),
             read_only: true,
             destructive: false,
@@ -299,7 +296,7 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_projects",
-            description: "List projects with stable paging. Identity is lean; detail=stats adds graph sizes.",
+            description: "List indexed projects. Usually unnecessary: project arguments default to the indexed workspace root.",
             schema: json!({
                 "type":"object",
                 "properties":{
@@ -322,7 +319,7 @@ pub fn tools() -> Vec<ToolDef> {
             description: "Delete a project and all its graph data.",
             schema: json!({
                 "type":"object",
-                "properties":{"project":{"type":"string"}},
+                "properties":{"project":{"type":"string","description":"Optional; defaults to the indexed workspace root."}},
                 "required":["project"]
             }),
             read_only: false,
@@ -333,16 +330,15 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "index_status",
-            description: "Project readiness, counts, root, generation, coverage gaps and doc_links. Best-effort; verify cited paths.",
+            description: "Readiness, counts, generation, coverage gaps and freshness. Not a setup step; get_task_context already reports freshness.",
             schema: json!({
                 "type":"object",
                 "properties":{
-                    "project":{"type":"string"},
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "verbose":{"type":"boolean","default":false},
                     "diagnostics":{"type":"string","enum":["none","summary","full"],"default":"none"},
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"}
                 },
-                "required":["project"]
             }),
             read_only: true,
             destructive: false,
@@ -352,11 +348,11 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "check_index_coverage",
-            description: "Best-effort exact-path/scope coverage and freshness, paged separately. Clean is not proof of completeness.",
+            description: "Check whether cited paths/scopes were fully indexed. Use only when coverage or freshness is in doubt; a clean result is not proof of repository-wide completeness.",
             schema: json!({
                 "type":"object",
                 "properties":{
-                    "project":{"type":"string"},
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "paths":{"type":"array","items":{"type":"string"},"maxItems":128},
                     "path_limit":{"type":"integer","default":20,"minimum":1,"maximum":128},
                     "path_offset":{"type":"integer","default":0,"minimum":0},
@@ -366,7 +362,6 @@ pub fn tools() -> Vec<ToolDef> {
                     "diagnostics":{"type":"string","enum":["none","full"],"default":"none"},
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"}
                 },
-                "required":["project"]
             }),
             read_only: true,
             destructive: false,
@@ -376,11 +371,11 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "get_task_context",
-            description: "Bounded, evidence-backed task context: resolve targets or a task, collect callers/callees/imports/services/changes, and return a size-limited payload with provenance. Profiles: context, scout, auditor.",
+            description: "Start here for a multi-part structural task. One bounded call resolves targets from a task or explicit targets and returns files, symbols, relationships, tests and provenance. Use depth 3 for route-to-repository chains; include tests for test-gap questions. Not for exact literal search.",
             schema: json!({
                 "type":"object",
                 "properties":{
-                    "project":{"type":"string"},
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "task":{"type":"string","description":"Task description used only when targets are omitted."},
                     "targets":{"type":"array","items":{"type":"string"},"maxItems":32,"description":"Symbols, qualified names, files, or search terms."},
                     "profile":{"type":"string","enum":["context","scout","auditor"],"default":"context"},
@@ -390,24 +385,24 @@ pub fn tools() -> Vec<ToolDef> {
                     "changed_paths":{"type":"array","items":{"type":"string"},"maxItems":40,"description":"Explicit changed files; avoids Git discovery."},
                     "expected_generation":{"type":"string","minLength":1},
                     "timeout_ms":{"type":"integer","default":3000,"minimum":1,"maximum":30000},
+                    "include_source":{"type":"boolean","default":false,"description":"Include exact source for the most relevant callables (bounded, 6 nodes)."},
                     "max_output_tokens":{"type":"integer","default":3200,"minimum":128,"maximum":1000000},
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"}
                 },
-                "required":["project"]
             }),
             read_only: true,
             destructive: false,
             idempotent: true,
             open_world: false,
-            always_load: false,
+            always_load: true,
         },
         ToolDef {
             name: "detect_changes",
-            description: "Map a Git diff to files, changed symbols, impacted symbols and risk. Scope tests adds test impact.",
+            description: "Map a Git diff to files, changed symbols, impacted symbols and risk. Scope tests adds test impact and policy.",
             schema: json!({
                 "type":"object",
                 "properties":{
-                    "project":{"type":"string"},
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "scope":{"type":"string","enum":["files","impact","tests"],"default":"impact"},
                     "direction":{"type":"string","enum":["inbound","outbound","both"],"default":"inbound"},
                     "depth":{"type":"integer","default":2},
@@ -430,7 +425,6 @@ pub fn tools() -> Vec<ToolDef> {
                     "since":{"type":"string"},
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"}
                 },
-                "required":["project"]
             }),
             read_only: true,
             destructive: false,
@@ -444,7 +438,7 @@ pub fn tools() -> Vec<ToolDef> {
             schema: json!({
                 "type":"object",
                 "properties":{
-                    "project":{"type":"string"},
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "mode":{"type":"string","enum":["outline","get","update","set_sections","sections","store"],"default":"outline"},
                     "content":{"type":"string"},
                     "section_updates":{"type":"object","additionalProperties":{"type":"string"}},
@@ -474,7 +468,7 @@ pub fn tools() -> Vec<ToolDef> {
                         "count":{"type":"integer"}
                     },"additionalProperties":false}},
                     "label":{"type":"string"},
-                    "project":{"type":"string"}
+                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."}
                 },
                 "required":["traces","project"]
             }),
@@ -528,7 +522,7 @@ pub fn tool_json(tool: &ToolDef) -> Value {
 }
 
 pub fn instructions(profile: ToolProfile) -> String {
-    let base = "gry is a local code knowledge graph of the indexed repository: functions, classes, methods, routes, calls, imports, inheritance, documentation, configuration and infrastructure. It answers structural code questions: where a symbol is defined, who calls a function, what it calls, call chains and data flow, which code a change affects, how modules fit together, and how services and deployments connect. search_graph finds symbols; trace_path follows callers, callees, data flow and infrastructure paths; get_code_snippet returns exact source; query_graph runs multi-hop Cypher; get_architecture summarizes structure; search_code combines text search with graph context; get_task_context assembles bounded task evidence with provenance (profiles: context, scout, auditor); detect_changes maps the current diff to affected symbols. check_index_coverage tells whether a cited file was fully indexed. Results are paginated.";
+    let base = "gry is a local code knowledge graph of the indexed repository: functions, classes, methods, routes, calls, imports, inheritance, documentation, configuration and infrastructure. Project arguments are optional; omit them to use the indexed workspace root. For a multi-part structural task, start with get_task_context (task, depth 3 for route-to-repository chains, include tests when the task asks about tests, impact or coverage). Use search_graph with name_pattern for a known identifier; query is broad BM25. trace_path follows callers/callees and returns Type.Method candidates when a short name is ambiguous. Use get_code_snippet or native reads for exact source before material claims; do not repeat discovery. Use search_code or native grep for exact literals and configuration. get_graph_schema is for authoring query_graph, not discovery; check_index_coverage is for a coverage doubt, not setup. Results are bounded and paginated; status, freshness, provenance and truncation are part of the evidence.";
     match profile {
         ToolProfile::All => base.to_string(),
         ToolProfile::Analysis => format!("analysis tool profile (read-only): {base}"),

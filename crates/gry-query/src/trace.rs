@@ -44,6 +44,38 @@ pub fn trace_path(store: &Store, req: &TraceRequest) -> gry_core::GryResult<Valu
     let project_record = store.require_project(&req.project)?;
     let start = resolve_start(store, &req.project, &req.function_name, &req.mode)?;
     let Some(start) = start else {
+        // A short name can name several real symbols. Returning candidates is
+        // actionable in one call; guessing the first would produce a confident
+        // trace of the wrong function.
+        let candidates = store.nodes_by_name(&req.project, req.function_name.trim())?;
+        if candidates.len() > 1 {
+            let rows: Vec<Value> = candidates
+                .iter()
+                .take(8)
+                .map(|n| {
+                    json!({
+                        "qn": n.qualified_name,
+                        "name": n.name,
+                        "label": n.label,
+                        "file": n.file_path,
+                        "lines": [n.start_line, n.end_line],
+                    })
+                })
+                .collect();
+            return Ok(json!({
+                "project": req.project,
+                "found": false,
+                "ambiguous": true,
+                "message": format!(
+                    "ambiguous symbol: {} matches {} indexed symbols; pass one of the qualified names",
+                    req.function_name,
+                    candidates.len()
+                ),
+                "candidates": rows,
+                "rows": [],
+                "total": 0,
+            }));
+        }
         return Ok(json!({
             "project": req.project,
             "found": false,
@@ -188,25 +220,24 @@ fn resolve_start(
     if let Some(node) = store.resolve_node(project, name)? {
         return Ok(Some(node));
     }
-    let nodes = store.all_nodes(project)?;
     let preferred: &[&str] = match mode {
         "topology" => &["Resource", "Route"],
         "deploy" => &["Function", "Module", "File", "Process"],
         "run" => &["Resource", "Image", "Process"],
         _ => &["Function", "Method", "Class"],
     };
-    for label in preferred {
-        if let Some(node) = nodes
-            .iter()
-            .find(|n| &n.label == label && (n.name == name || n.qualified_name == name))
-        {
-            return Ok(Some(node.clone()));
-        }
+    let candidates: Vec<Node> = store
+        .nodes_by_name(project, name)?
+        .into_iter()
+        .filter(|n| preferred.iter().any(|label| *label == n.label))
+        .collect();
+    // Only a single candidate of the mode's preferred label is unambiguous.
+    // Otherwise the caller reports the candidates and asks for a qualified
+    // name instead of silently tracing an arbitrary symbol.
+    if candidates.len() == 1 {
+        return Ok(candidates.into_iter().next());
     }
-    Ok(nodes
-        .iter()
-        .find(|n| n.name == name || n.qualified_name == name)
-        .cloned())
+    Ok(None)
 }
 
 fn default_edges(mode: &str) -> &'static [&'static str] {
@@ -358,5 +389,76 @@ mod tests {
         .unwrap();
         let row = out["rows"].as_array().unwrap().first().unwrap();
         assert!(row["risk"].is_string());
+    }
+
+    #[test]
+    fn type_member_name_resolves_without_a_full_qn() {
+        let store = test_store();
+        let out = trace_path(
+            &store,
+            &TraceRequest {
+                project: "p".into(),
+                function_name: "main.main".into(),
+                direction: "outbound".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out["found"], true);
+        assert!(out["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "parseRequest"));
+    }
+
+    #[test]
+    fn ambiguous_short_name_returns_candidates() {
+        use gry_core::types::NewNode;
+        use gry_store::ProjectWrite;
+        let mut store = gry_store::Store::open_in_memory().unwrap();
+        let nodes = vec![
+            NewNode::new(
+                "Function",
+                "Fetch",
+                "p.repository.taskRepository.Fetch",
+                "repository/task.go",
+                1,
+                5,
+            ),
+            NewNode::new(
+                "Function",
+                "Fetch",
+                "p.usecase.taskUsecase.Fetch",
+                "usecase/task.go",
+                1,
+                5,
+            ),
+            NewNode::new(
+                "Function",
+                "Fetch",
+                "p.domain.mocks.TaskRepository.Fetch",
+                "domain/mocks/TaskRepository.go",
+                1,
+                5,
+            ),
+        ];
+        let mut write = ProjectWrite::new("p", "/tmp/p", "full", "gen-1");
+        write.nodes = &nodes;
+        store.publish(&write).unwrap();
+        let out = trace_path(
+            &store,
+            &TraceRequest {
+                project: "p".into(),
+                function_name: "Fetch".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out["found"], false);
+        assert_eq!(out["ambiguous"], true);
+        let candidates = out["candidates"].as_array().unwrap();
+        assert_eq!(candidates.len(), 3);
+        assert!(!candidates[0]["qn"].as_str().unwrap().contains("mocks"));
     }
 }

@@ -255,6 +255,7 @@ pub fn context_request_for(stage: &str, req: &HookRequest) -> ContextRequest {
                 .unwrap_or_else(|| default_task_id(stage, req)),
         ),
         stage: Some(stage.to_string()),
+        include_source: false,
     }
 }
 

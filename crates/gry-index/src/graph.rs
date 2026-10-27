@@ -78,6 +78,32 @@ impl GraphBuilder {
                 && !file_path.is_empty()
                 && !existing.file_path.is_empty()
             {
+                // A route is often exercised in a test before the production
+                // registration is visited. Keep the production file as the
+                // canonical location and record the test as a variant; a
+                // route that points at a test file is misleading provenance.
+                let promote_production_route = existing.label == labels::ROUTE
+                    && is_test_path(&existing.file_path)
+                    && !is_test_path(file_path);
+                if promote_production_route {
+                    let old = serde_json::json!({
+                        "file_path": existing.file_path,
+                        "start_line": existing.start_line,
+                        "end_line": existing.end_line,
+                    });
+                    existing.file_path = file_path.to_string();
+                    existing.start_line = start_line;
+                    existing.end_line = end_line;
+                    if let Value::Object(ref mut map) = existing.properties {
+                        match map.get_mut("variants") {
+                            Some(Value::Array(items)) => items.push(old),
+                            _ => {
+                                map.insert("variants".to_string(), Value::Array(vec![old]));
+                            }
+                        }
+                    }
+                    return qn.to_string();
+                }
                 let variant = serde_json::json!({
                     "file_path": file_path,
                     "start_line": start_line,
@@ -339,4 +365,55 @@ pub fn props(pairs: &[(&str, &str)]) -> Map<String, Value> {
         .iter()
         .map(|(k, v)| ((*k).to_string(), Value::String((*v).to_string())))
         .collect()
+}
+
+fn is_test_path(path: &str) -> bool {
+    let path = path.replace('\\', "/").to_ascii_lowercase();
+    path.starts_with("test/")
+        || path.starts_with("tests/")
+        || path.contains("/test/")
+        || path.contains("/tests/")
+        || path.contains("/__tests__/")
+        || path.ends_with("_test.go")
+        || path.ends_with("_test.py")
+        || path.ends_with("_test.rs")
+        || path.ends_with(".test.ts")
+        || path.ends_with(".test.js")
+        || path.ends_with(".spec.ts")
+        || path.ends_with(".spec.js")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_route_replaces_a_test_route_as_canonical() {
+        let mut builder = GraphBuilder::new("p", "/tmp/p", "full");
+        builder.add_node(
+            labels::ROUTE,
+            "/profile",
+            "__route__GET__/profile",
+            "api/controller/profile_controller_test.go",
+            50,
+            50,
+            props(&[("method", "GET"), ("url_path", "/profile")]),
+        );
+        builder.add_node(
+            labels::ROUTE,
+            "/profile",
+            "__route__GET__/profile",
+            "api/route/profile_route.go",
+            20,
+            20,
+            props(&[("method", "GET"), ("url_path", "/profile")]),
+        );
+        let node = builder.nodes.get("__route__GET__/profile").unwrap();
+        assert_eq!(node.file_path, "api/route/profile_route.go");
+        assert_eq!(node.start_line, 20);
+        let variants = node.properties["variants"].as_array().unwrap();
+        assert!(variants
+            .iter()
+            .any(|v| { v["file_path"] == "api/controller/profile_controller_test.go" }));
+    }
 }

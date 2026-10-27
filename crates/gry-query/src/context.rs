@@ -10,6 +10,7 @@
 //! None of these mean "runtime true"; they describe the evidence gry has.
 
 use crate::impact::{changed_paths, detect_base_branch};
+use gry_core::tokenize::split_identifier;
 use gry_core::types::{labels, Node};
 use gry_store::traverse::{Direction, TraceParams};
 use gry_store::Store;
@@ -49,6 +50,7 @@ pub struct ContextRequest {
     pub timeout_ms: u64,
     pub task_id: Option<String>,
     pub stage: Option<String>,
+    pub include_source: bool,
 }
 
 impl Default for ContextRequest {
@@ -67,6 +69,7 @@ impl Default for ContextRequest {
             timeout_ms: 3000,
             task_id: None,
             stage: None,
+            include_source: false,
         }
     }
 }
@@ -89,6 +92,24 @@ pub fn get_task_context(store: &Store, req: &ContextRequest) -> gry_core::GryRes
     }
     if profile == "scout" && !includes.iter().any(|i| i == "coverage") {
         includes.push("coverage".to_string());
+    }
+    // A default (no explicit include list) task about tests, impact or a change
+    // needs test evidence to answer; otherwise the bounded traversal drops it
+    // and the caller has to make a second query.
+    if req.include.is_empty() {
+        let mentions_tests = req
+            .task
+            .as_deref()
+            .map(|task| {
+                let lower = task.to_ascii_lowercase();
+                ["test", "coverage", "impact", "change", "regression"]
+                    .iter()
+                    .any(|term| lower.contains(term))
+            })
+            .unwrap_or(false);
+        if mentions_tests && !includes.iter().any(|i| i == "tests") {
+            includes.push("tests".to_string());
+        }
     }
     let changes_requested = includes.iter().any(|i| i == "changes");
     let record = store.require_project(&req.project)?;
@@ -402,6 +423,11 @@ pub fn get_task_context(store: &Store, req: &ContextRequest) -> gry_core::GryRes
         .map(|e| e.node.qualified_name.as_str())
         .collect();
     let kept: HashSet<String> = kept.into_iter().map(str::to_string).collect();
+    let sources = if req.include_source {
+        source_rows(root, &node_rows)
+    } else {
+        Vec::new()
+    };
 
     let mut relationships: Vec<Value> = Vec::new();
     let mut rel_seen: HashSet<(String, String, String)> = HashSet::new();
@@ -450,6 +476,11 @@ pub fn get_task_context(store: &Store, req: &ContextRequest) -> gry_core::GryRes
     let services = service_rows(&node_rows);
     let boundaries = boundary_rows(&node_rows);
     let tests = test_rows(&node_rows);
+    let test_coverage = if includes.iter().any(|i| i == "tests") {
+        test_coverage_report(store, &req.project, &node_rows)?
+    } else {
+        Value::Null
+    };
     let evidence_paths = referenced_paths(&resolved_targets, &node_rows, &req.changed_paths);
     let coverage = coverage_report(
         store,
@@ -599,6 +630,13 @@ pub fn get_task_context(store: &Store, req: &ContextRequest) -> gry_core::GryRes
             .map(|t| t.json())
             .collect::<Vec<_>>()),
     );
+    if req.include_source {
+        out.insert("sources".into(), json!(sources));
+        out.insert(
+            "source_note".into(),
+            json!("Exact source for the indexed ranges below; do not read the same ranges again. Check freshness before treating it as current."),
+        );
+    }
     out.insert(
         "nodes".into(),
         json!(node_rows.iter().map(|e| e.json()).collect::<Vec<_>>()),
@@ -608,6 +646,9 @@ pub fn get_task_context(store: &Store, req: &ContextRequest) -> gry_core::GryRes
     out.insert("services".into(), json!(services));
     out.insert("boundaries".into(), json!(boundaries));
     out.insert("tests".into(), json!(tests));
+    if !test_coverage.is_null() {
+        out.insert("test_coverage".into(), test_coverage);
+    }
     if !change_report.is_null() {
         out.insert("changes".into(), change_report);
     }
@@ -964,7 +1005,7 @@ fn role_priority(role: &str) -> u8 {
     match role {
         "target" => 0,
         "target_member" => 1,
-        "caller" | "callee" => 1,
+        "caller" | "callee" | "handler" | "handled_route" => 1,
         "dependency" | "importer" | "base" | "subtype" => 2,
         "usage" | "used_by" => 2,
         "service" => 2,
@@ -1159,7 +1200,28 @@ fn resolve_target(
         // symbol match.
         return resolve_file_target(store, project, trimmed);
     }
-    let hits = store.bm25(project, trimmed, None, None, None, None, 5, 0)?;
+    if !from_task && (trimmed.contains('.') || trimmed.contains("::")) {
+        // An explicit `Type.Method` that did not resolve as a suffix may still
+        // be a short name on its own, but do not turn an unresolved external
+        // name such as `primitive.ObjectID` into an unrelated BM25 hit.
+        if let Some(short) = last_identifier_segment(trimmed) {
+            if short != trimmed {
+                if let Some(node) = store.resolve_node(project, short)? {
+                    return Ok(ResolvedTarget {
+                        input: input.to_string(),
+                        method: "name".to_string(),
+                        provenance: "inferred".to_string(),
+                        node: Some(node),
+                        members: Vec::new(),
+                        file: None,
+                        reason: None,
+                    });
+                }
+            }
+        }
+        return Ok(unresolved_target(input, "not_found"));
+    }
+    let hits = store.bm25(project, trimmed, None, None, None, None, 8, 0)?;
     let Some(hits) = hits else {
         return Ok(unresolved_target(input, "not_found"));
     };
@@ -1233,7 +1295,22 @@ fn is_container_label(label: &str) -> bool {
 }
 
 fn looks_like_path(value: &str) -> bool {
-    value.contains('/') || value.contains('\\') || Path::new(value).extension().is_some()
+    if value.contains('/') || value.contains('\\') {
+        return true;
+    }
+    // A dotted identifier is not a file path. Requiring a known source
+    // extension prevents `TaskRepository.FetchByUserID` from being sent to
+    // file resolution and reported as `file_not_indexed`.
+    const SOURCE_EXTENSIONS: &[&str] = &[
+        ".go", ".rs", ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".java", ".kt",
+        ".kts", ".scala", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".rb", ".php", ".swift", ".m",
+        ".mm", ".rs", ".ex", ".exs", ".erl", ".hrl", ".hs", ".lhs", ".ml", ".mli", ".fs", ".fsx",
+        ".clj", ".cljs", ".lua", ".pl", ".pm", ".r", ".jl", ".dart", ".sol", ".vue", ".svelte",
+        ".sh", ".bash", ".zsh", ".fish", ".ps1", ".sql", ".json", ".jsonc", ".yaml", ".yml",
+        ".toml", ".ini", ".md", ".mdx", ".rst", ".adoc",
+    ];
+    let lower = value.to_ascii_lowercase();
+    SOURCE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
 }
 
 fn normalize_path(path: &str) -> String {
@@ -1291,23 +1368,289 @@ fn task_words(task: &str) -> Vec<String> {
         "about",
         "need",
         "want",
+        "would",
+        "could",
+        "explain",
+        "identify",
+        "list",
+        "give",
+        "state",
+        "find",
+        "locate",
+        "trace",
+        "show",
+        "tell",
     ];
     let mut words: Vec<String> = Vec::new();
-    for raw in
-        task.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '/' && c != '.' && c != '-')
-    {
-        let word = raw.trim().to_ascii_lowercase();
-        if word.len() < 2 || STOPWORDS.contains(&word.as_str()) {
-            continue;
+    let push = |word: &str, words: &mut Vec<String>| {
+        let word = word.trim().to_ascii_lowercase();
+        if word.len() < 2
+            || STOPWORDS.contains(&word.as_str())
+            || word.chars().all(|c| c.is_ascii_digit())
+        {
+            return;
         }
         if !words.contains(&word) {
-            words.push(word);
+            words.push(word.clone());
         }
-        if words.len() >= 8 {
+        if let Some(singular) = singular_form(&word) {
+            if !words.contains(&singular) {
+                words.push(singular);
+            }
+        }
+    };
+    for raw in task.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                ',' | ';'
+                    | '!'
+                    | '?'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '"'
+                    | '\''
+                    | '`'
+                    | '<'
+                    | '>'
+                    | '|'
+                    | '='
+            )
+    }) {
+        let raw = raw.trim_matches(|c: char| matches!(c, '.' | ':' | ',' | ';'));
+        if raw.is_empty() {
+            continue;
+        }
+        if looks_like_path(raw) {
+            push(raw, &mut words);
+            continue;
+        }
+        // `TaskRepository.FetchByUserID` should contribute the identifier
+        // segments, not one opaque token. This also makes singular/plural
+        // forms meet (`tasks` -> `task`, `fetches` -> `fetch`) without a
+        // stemming dependency.
+        for part in raw.split(['.', ':']) {
+            for token in split_identifier(part) {
+                push(&token, &mut words);
+            }
+        }
+        if words.len() >= 16 {
             break;
         }
     }
+    words.truncate(16);
     words
+}
+
+fn singular_form(word: &str) -> Option<String> {
+    let len = word.len();
+    if len < 4 || word.ends_with("ss") || word.ends_with("us") || word.ends_with("is") {
+        return None;
+    }
+    if let Some(stem) = word.strip_suffix("ies") {
+        if stem.len() >= 2 {
+            return Some(format!("{stem}y"));
+        }
+    }
+    if let Some(stem) = word.strip_suffix("es") {
+        if stem.len() >= 3 && !stem.ends_with('s') {
+            return Some(stem.to_string());
+        }
+    }
+    if let Some(stem) = word.strip_suffix('s') {
+        if stem.len() >= 3 {
+            return Some(stem.to_string());
+        }
+    }
+    None
+}
+
+/// Raw symbol-like tokens from a task. Case is preserved so a qualified name
+/// can be resolved exactly; paths and prose are excluded.
+fn task_identifiers(task: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in task.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                ',' | ';'
+                    | '!'
+                    | '?'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '"'
+                    | '\''
+                    | '`'
+                    | '<'
+                    | '>'
+                    | '|'
+                    | '='
+            )
+    }) {
+        let token = raw.trim_matches(|c: char| matches!(c, ',' | ';' | ':' | '!' | '?'));
+        if token.len() < 4 || looks_like_path(token) {
+            continue;
+        }
+        let qualified = token.contains('.') || token.contains("::") || token.contains('_');
+        let camel =
+            token.chars().any(|c| c.is_uppercase()) && token.chars().any(|c| c.is_lowercase());
+        if !(qualified || camel) {
+            continue;
+        }
+        // A trailing sentence period is punctuation, not part of a name.
+        let token = token.trim_end_matches('.');
+        if token.len() >= 4 && !out.iter().any(|t| t == token) {
+            out.push(token.to_string());
+        }
+        if out.len() >= 8 {
+            break;
+        }
+    }
+    out
+}
+
+fn last_identifier_segment(input: &str) -> Option<&str> {
+    input.rsplit(['.', ':']).find(|part| !part.is_empty())
+}
+
+fn is_code_target_label(label: &str) -> bool {
+    matches!(
+        label,
+        labels::ROUTE
+            | labels::FUNCTION
+            | labels::METHOD
+            | labels::CLASS
+            | labels::STRUCT
+            | labels::INTERFACE
+            | labels::TRAIT
+            | labels::TYPE
+            | labels::FIELD
+            | labels::CONSTANT
+            | labels::VARIABLE
+    )
+}
+
+fn is_config_target(node: &Node) -> bool {
+    node.qualified_name.starts_with("__config__")
+        || node.qualified_name.starts_with("__env__")
+        || node.file_path.ends_with(".env")
+        || node.file_path.ends_with(".env.example")
+}
+
+fn is_synthetic_target(node: &Node) -> bool {
+    node.qualified_name.starts_with("__channel__")
+        || node.qualified_name.starts_with("__package__")
+        || node.qualified_name.starts_with("__external__")
+        || node.qualified_name.starts_with("__global_")
+}
+
+fn is_support_node(node: &Node) -> bool {
+    if node.property_bool("is_generated").unwrap_or(false)
+        || node.property_bool("generated").unwrap_or(false)
+    {
+        return true;
+    }
+    let path = node.file_path.replace('\\', "/").to_ascii_lowercase();
+    let file = path.rsplit('/').next().unwrap_or("");
+    path.contains("/mocks/")
+        || path.starts_with("mocks/")
+        || path.contains("/mock/")
+        || path.starts_with("mock/")
+        || file.starts_with("mock_")
+        || file.ends_with("_mock.go")
+        || file.ends_with("_mock.rs")
+        || file.ends_with(".mock.ts")
+        || file.ends_with(".mock.js")
+        || file.contains(".mock.")
+}
+
+fn is_constructor_name(name: &str) -> bool {
+    name.starts_with("New") || name.starts_with("new_") || name == "init" || name == "Init"
+}
+
+fn task_affinity(node: &Node, words: &[String]) -> usize {
+    const GENERIC: &[&str] = &[
+        "fetch",
+        "get",
+        "create",
+        "list",
+        "user",
+        "data",
+        "request",
+        "response",
+        "handler",
+        "route",
+        "api",
+        "http",
+        "https",
+        "controller",
+        "repository",
+        "usecase",
+        "code",
+        "file",
+        "files",
+        "function",
+        "functions",
+        "call",
+        "called",
+        "calls",
+        "uses",
+        "using",
+    ];
+    let hay =
+        format!("{} {} {}", node.name, node.qualified_name, node.file_path).to_ascii_lowercase();
+    words
+        .iter()
+        .filter(|word| {
+            word.len() >= 4 && !GENERIC.contains(&word.as_str()) && hay.contains(word.as_str())
+        })
+        .count()
+}
+
+fn task_target_rank(
+    node: &Node,
+    degree: i64,
+    explicit: u8,
+    words: &[String],
+) -> (
+    u8,
+    u8,
+    u8,
+    u8,
+    u8,
+    std::cmp::Reverse<usize>,
+    std::cmp::Reverse<i64>,
+    String,
+) {
+    let support = if is_support_node(node) {
+        2
+    } else if is_test_node(node) {
+        1
+    } else {
+        0
+    };
+    (
+        explicit,
+        support,
+        if is_synthetic_target(node) { 1 } else { 0 },
+        target_label_priority(&node.label),
+        if is_constructor_name(&node.name) {
+            1
+        } else {
+            0
+        },
+        std::cmp::Reverse(task_affinity(node, words)),
+        std::cmp::Reverse(degree),
+        node.qualified_name.clone(),
+    )
 }
 
 fn task_targets(
@@ -1320,64 +1663,164 @@ fn task_targets(
     if words.is_empty() {
         return Ok(Vec::new());
     }
-    let mut targets = Vec::new();
+    let allow_containers = ["architecture", "package", "module", "layer", "structure"]
+        .iter()
+        .any(|term| words.iter().any(|word| word == term));
+    let allow_infrastructure = [
+        "deploy",
+        "deployment",
+        "docker",
+        "compose",
+        "kubernetes",
+        "helm",
+        "terraform",
+        "infrastructure",
+        "config",
+        "environment",
+        "env",
+        "service",
+    ]
+    .iter()
+    .any(|term| words.iter().any(|word| word == term));
+    let mut candidates: Vec<(Node, i64, u8)> = Vec::new();
+    let add = |node: Node, degree: i64, explicit: u8, candidates: &mut Vec<(Node, i64, u8)>| {
+        if candidates
+            .iter()
+            .any(|(existing, _, _)| existing.qualified_name == node.qualified_name)
+        {
+            return;
+        }
+        candidates.push((node, degree, explicit));
+    };
+
     let routes = task_http_routes(task);
     let requested_paths: HashSet<String> = routes.iter().map(|(_, path)| path.clone()).collect();
     for (method, path) in &routes {
         let qn = format!("__route__{method}__{path}");
-        if store.resolve_node(project, &qn)?.is_some() && !targets.contains(&qn) {
-            targets.push(qn);
+        if let Some(node) = store.resolve_node(project, &qn)? {
+            add(node, 0, 0, &mut candidates);
         }
     }
+
+    // Resolve explicit symbol-like names before broad BM25. This is what turns
+    // `TaskRepository.FetchByUserID` into the production method instead of a
+    // mock or a `file_not_indexed` result.
+    for identifier in task_identifiers(task) {
+        if let Some(node) = store.resolve_node(project, &identifier)? {
+            if !is_test_node(&node)
+                && !is_support_node(&node)
+                && !is_synthetic_target(&node)
+                && (is_code_target_label(&node.label) || allow_infrastructure)
+                && (!is_config_target(&node) || allow_infrastructure)
+            {
+                add(node.clone(), 0, 0, &mut candidates);
+                continue;
+            }
+        }
+        if let Some(short) = last_identifier_segment(&identifier) {
+            if short != identifier {
+                if let Some(node) = store.resolve_node(project, short)? {
+                    if !is_test_node(&node)
+                        && !is_support_node(&node)
+                        && !is_synthetic_target(&node)
+                    {
+                        add(node, 0, 0, &mut candidates);
+                    }
+                }
+            }
+        }
+    }
+
     for word in &words {
         if looks_like_path(word) && !requested_paths.contains(word) {
-            targets.push(word.clone());
+            if let Ok(nodes) = store.nodes_by_file(project, &normalize_path(word)) {
+                for node in nodes
+                    .into_iter()
+                    .filter(|n| !is_container_label(&n.label) && !is_doc_label(&n.label))
+                    .take(3)
+                {
+                    add(node, 0, 0, &mut candidates);
+                }
+            }
         }
     }
-    let query = words.join(" ");
-    let mut queries = vec![query];
-    queries.extend(words.iter().cloned());
+
+    // Per-word BM25 keeps the broad OR semantics of a long task from flooding
+    // the candidate set with high-degree constructors. Explicit identifiers
+    // and routes were already resolved above.
+    let queries: Vec<String> = words.clone();
+    let search_limit = 8;
     let mut docs: Vec<String> = Vec::new();
     for query in queries {
-        if targets.len() >= limit {
+        if candidates.len() >= search_limit {
             break;
         }
-        let Some(hits) = store.bm25(project, &query, None, None, None, None, limit, 0)? else {
+        let Some(hits) = store.bm25(project, &query, None, None, None, None, search_limit, 0)?
+        else {
             continue;
         };
         for hit in &hits.hits {
             let node = &hit.node;
-            // A task that names an HTTP method and path is asking about that
-            // route, not every other route that shares the verb.
             if node.label == labels::ROUTE
                 && !requested_paths.is_empty()
                 && !requested_paths.contains(&node.name)
             {
                 continue;
             }
-            if is_container_label(&node.label) || is_doc_label(&node.label) {
+            if !is_code_target_label(&node.label) && !allow_infrastructure {
+                continue;
+            }
+            if is_config_target(node) && !allow_infrastructure {
+                continue;
+            }
+            if is_doc_label(&node.label) {
                 if !docs.contains(&node.qualified_name) {
                     docs.push(node.qualified_name.clone());
                 }
                 continue;
             }
-            if !targets.contains(&node.qualified_name) {
-                targets.push(node.qualified_name.clone());
+            if is_container_label(&node.label) {
+                if allow_containers {
+                    add(
+                        node.clone(),
+                        hit.in_degree + hit.out_degree,
+                        1,
+                        &mut candidates,
+                    );
+                } else if !docs.contains(&node.qualified_name) {
+                    docs.push(node.qualified_name.clone());
+                }
+                continue;
             }
-            if targets.len() >= limit {
-                break;
+            if is_test_node(node) || is_support_node(node) || is_synthetic_target(node) {
+                continue;
             }
+            add(
+                node.clone(),
+                hit.in_degree + hit.out_degree,
+                1,
+                &mut candidates,
+            );
         }
     }
-    // Documentation is useful tangential evidence, never a substitute for a
-    // code target that matched the same task.
-    for doc in docs {
-        if targets.len() >= limit {
-            break;
-        }
-        if !targets.contains(&doc) {
-            targets.push(doc);
-        }
+
+    candidates.sort_by(|(a, a_degree, a_explicit), (b, b_degree, b_explicit)| {
+        task_target_rank(a, *a_degree, *a_explicit, &words).cmp(&task_target_rank(
+            b,
+            *b_degree,
+            *b_explicit,
+            &words,
+        ))
+    });
+    let mut targets: Vec<String> = candidates
+        .into_iter()
+        .take(limit)
+        .map(|(node, _, _)| node.qualified_name)
+        .collect();
+    // Documentation is tangential evidence, never a substitute for a code
+    // target that matched the same task. Keep it only when nothing else did.
+    if targets.is_empty() {
+        targets.extend(docs.into_iter().take(limit));
     }
     Ok(targets)
 }
@@ -1539,6 +1982,72 @@ fn boundary_rows(nodes: &[&NodeEntry]) -> Vec<Value> {
     rows
 }
 
+/// Exact source for the small set of callables that answer the task. This is
+/// opt-in because it consumes the output budget; when it is present the caller
+/// does not need a second snippet/read call for the same symbol.
+fn source_rows(root: &Path, nodes: &[&NodeEntry]) -> Vec<Value> {
+    const MAX_NODES: usize = 4;
+    const MAX_LINES_PER_NODE: usize = 50;
+    const MAX_TOTAL_LINES: usize = 220;
+    let mut rows = Vec::new();
+    let mut total_lines = 0usize;
+    for entry in nodes {
+        if rows.len() >= MAX_NODES || total_lines >= MAX_TOTAL_LINES {
+            break;
+        }
+        if !matches!(
+            entry.role,
+            "target" | "target_member" | "caller" | "callee" | "handler" | "handled_route"
+        ) {
+            continue;
+        }
+        if !matches!(
+            entry.node.label.as_str(),
+            labels::FUNCTION | labels::METHOD | labels::ROUTE
+        ) || entry.node.file_path.is_empty()
+        {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(root.join(&entry.node.file_path)) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.is_empty() {
+            continue;
+        }
+        let start = entry.node.start_line.max(1) as usize;
+        let end = (entry.node.end_line.max(entry.node.start_line) as usize).min(lines.len());
+        if start > end {
+            continue;
+        }
+        let available = end - start + 1;
+        let take = available
+            .min(MAX_LINES_PER_NODE)
+            .min(MAX_TOTAL_LINES.saturating_sub(total_lines));
+        if take == 0 {
+            break;
+        }
+        let source: Vec<String> = lines[start - 1..start - 1 + take]
+            .iter()
+            .enumerate()
+            .map(|(offset, line)| format!("{}\t{}", start + offset, line))
+            .collect();
+        total_lines += take;
+        rows.push(json!({
+            "qn": entry.node.qualified_name,
+            "name": entry.node.name,
+            "label": entry.node.label,
+            "file": entry.node.file_path,
+            "lines": [start, start + take - 1],
+            "declared_lines": [entry.node.start_line, entry.node.end_line],
+            "source": source.join("\n"),
+            "truncated": take < available,
+            "provenance": entry.provenance,
+        }));
+    }
+    rows
+}
+
 fn test_rows(nodes: &[&NodeEntry]) -> Vec<Value> {
     let mut rows: Vec<Value> = nodes
         .iter()
@@ -1556,6 +2065,237 @@ fn test_rows(nodes: &[&NodeEntry]) -> Vec<Value> {
         .collect();
     rows.sort_by(|a, b| a["qn"].as_str().cmp(&b["qn"].as_str()));
     rows
+}
+
+fn is_test_path(path: &str) -> bool {
+    let path = path.replace('\\', "/").to_ascii_lowercase();
+    path.starts_with("test/")
+        || path.starts_with("tests/")
+        || path.contains("/test/")
+        || path.contains("/tests/")
+        || path.contains("/__tests__/")
+        || path.ends_with("_test.go")
+        || path.ends_with("_test.py")
+        || path.ends_with("_test.rs")
+        || path.ends_with(".test.ts")
+        || path.ends_with(".test.js")
+        || path.ends_with(".spec.ts")
+        || path.ends_with(".spec.js")
+}
+
+fn is_test_coverage_target(node: &Node) -> bool {
+    if is_test_node(node) || is_support_node(node) || is_synthetic_target(node) {
+        return false;
+    }
+    matches!(
+        node.label.as_str(),
+        labels::ROUTE
+            | labels::FUNCTION
+            | labels::METHOD
+            | labels::CLASS
+            | labels::STRUCT
+            | labels::INTERFACE
+            | labels::TRAIT
+            | labels::TYPE
+    )
+}
+
+/// Bounded test-gap evidence. A missing `TESTS` edge means the bounded context
+/// did not reach a test, not that no test exists in the repository.
+fn test_coverage_report(
+    store: &Store,
+    _project: &str,
+    nodes: &[&NodeEntry],
+) -> gry_core::GryResult<Value> {
+    let targets: Vec<&NodeEntry> = nodes
+        .iter()
+        .copied()
+        .filter(|e| is_test_coverage_target(&e.node))
+        .filter(|e| {
+            matches!(
+                e.role,
+                "target" | "target_member" | "caller" | "callee" | "used_by" | "usage"
+            )
+        })
+        .take(24)
+        .collect();
+    if targets.is_empty() {
+        return Ok(json!({
+            "status": "no_production_targets",
+            "scope": "bounded_context",
+            "targets": [],
+            "linked_tests": [],
+            "linked_test_files": [],
+            "untested_targets": [],
+            "note": "No production callable was reached, so test-gap evidence is unavailable.",
+        }));
+    }
+    let target_qns: HashSet<&str> = targets
+        .iter()
+        .map(|e| e.node.qualified_name.as_str())
+        .collect();
+    let test_qns: HashSet<&str> = nodes
+        .iter()
+        .filter(|e| is_test_node(&e.node))
+        .map(|e| e.node.qualified_name.as_str())
+        .collect();
+    let mut tested: HashSet<String> = HashSet::new();
+    let mut links: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // Query TESTS edges directly. BFS may report the same pair through a CALLS
+    // edge first, so a test-to-production relationship can be absent from the
+    // retained node evidence even though the index has it.
+    let ids: Vec<i64> = nodes.iter().map(|entry| entry.node.id).collect();
+    let by_id: HashMap<i64, &str> = nodes
+        .iter()
+        .map(|entry| (entry.node.id, entry.node.qualified_name.as_str()))
+        .collect();
+    if !ids.is_empty() {
+        let types = vec!["TESTS".to_string(), "TESTS_FILE".to_string()];
+        for edge in store.edges_for_nodes(&ids, &types, "both")? {
+            let (Some(source), Some(target)) =
+                (by_id.get(&edge.source_id), by_id.get(&edge.target_id))
+            else {
+                continue;
+            };
+            if test_qns.contains(source) && target_qns.contains(target) {
+                tested.insert((*target).to_string());
+                links
+                    .entry((*source).to_string())
+                    .or_default()
+                    .insert((*target).to_string());
+            } else if test_qns.contains(target) && target_qns.contains(source) {
+                tested.insert((*source).to_string());
+                links
+                    .entry((*target).to_string())
+                    .or_default()
+                    .insert((*source).to_string());
+            }
+        }
+    }
+    for entry in nodes {
+        for evidence in &entry.evidence {
+            if !matches!(evidence.edge.as_str(), "TESTS" | "TESTS_FILE") {
+                continue;
+            }
+            let (test, product) = if test_qns.contains(evidence.source.as_str()) {
+                (evidence.source.as_str(), evidence.target.as_str())
+            } else if test_qns.contains(evidence.target.as_str()) {
+                (evidence.target.as_str(), evidence.source.as_str())
+            } else {
+                continue;
+            };
+            if !target_qns.contains(product) {
+                continue;
+            }
+            tested.insert(product.to_string());
+            links
+                .entry(test.to_string())
+                .or_default()
+                .insert(product.to_string());
+        }
+    }
+    // Go tests often pass a handler as a value (`gin.GET("/profile", pc.Fetch)`)
+    // rather than calling it. The graph records that as a Route with a test-file
+    // variant, not as a TESTS edge. Surface the variant as inferred test
+    // evidence, clearly separated from a verified TESTS edge.
+    let mut route_test_files: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for entry in nodes {
+        if entry.node.label != labels::ROUTE {
+            continue;
+        }
+        let test_files: Vec<String> = entry
+            .node
+            .properties
+            .get("variants")
+            .and_then(Value::as_array)
+            .map(|variants| {
+                variants
+                    .iter()
+                    .filter_map(|variant| variant.get("file_path").and_then(Value::as_str))
+                    .filter(|path| is_test_path(path))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if test_files.is_empty() {
+            continue;
+        }
+        let handlers: BTreeSet<String> = nodes
+            .iter()
+            .flat_map(|candidate| candidate.evidence.iter())
+            .filter(|evidence| {
+                evidence.edge == "HANDLES" && evidence.target == entry.node.qualified_name
+            })
+            .map(|evidence| evidence.source.clone())
+            .filter(|handler| target_qns.contains(handler.as_str()))
+            .collect();
+        for file in test_files {
+            for handler in &handlers {
+                route_test_files
+                    .entry(file.clone())
+                    .or_default()
+                    .insert(handler.clone());
+                tested.insert(handler.clone());
+            }
+        }
+    }
+    let linked_test_files: Vec<Value> = route_test_files
+        .into_iter()
+        .take(12)
+        .map(|(file, targets)| {
+            json!({
+                "file": file,
+                "targets": targets.into_iter().collect::<Vec<_>>(),
+                "via": "route_registration",
+                "provenance": "inferred",
+            })
+        })
+        .collect();
+    let linked_tests: Vec<Value> = links
+        .into_iter()
+        .take(16)
+        .map(|(test_qn, targets)| {
+            let file = nodes
+                .iter()
+                .find(|e| e.node.qualified_name == test_qn)
+                .map(|e| e.node.file_path.clone())
+                .unwrap_or_default();
+            json!({"test_qn": test_qn, "test_file": file, "targets": targets.into_iter().collect::<Vec<_>>()})
+        })
+        .collect();
+    let untested: Vec<Value> = targets
+        .iter()
+        .filter(|e| !tested.contains(&e.node.qualified_name))
+        .take(12)
+        .map(|e| {
+            json!({
+                "qn": e.node.qualified_name,
+                "file": e.node.file_path,
+                "lines": [e.node.start_line, e.node.end_line],
+                "reason": "no TESTS edge reached in this bounded context",
+            })
+        })
+        .collect();
+    let target_rows: Vec<Value> = targets
+        .iter()
+        .take(12)
+        .map(|e| {
+            json!({
+                "qn": e.node.qualified_name,
+                "file": e.node.file_path,
+                "role": e.role,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "status": if tested.is_empty() { "no_test_edges" } else { "bounded" },
+        "scope": "bounded_context",
+        "targets": target_rows,
+        "linked_tests": linked_tests,
+        "linked_test_files": linked_test_files,
+        "untested_targets": untested,
+        "note": "A missing TESTS edge is missing evidence in the bounded context, not proof that no test exists. Route registrations in test files are inferred test evidence; verify in source.",
+    }))
 }
 
 fn referenced_paths(
@@ -2402,8 +3142,13 @@ fn trim_arrays(value: &mut Value, target: usize, omitted: &mut BTreeMap<String, 
         &["map", "services"],
         &["relationships"],
         &["files"],
+        &["sources"],
         &["boundaries"],
         &["services"],
+        &["test_coverage", "targets"],
+        &["test_coverage", "linked_tests"],
+        &["test_coverage", "linked_test_files"],
+        &["test_coverage", "untested_targets"],
         &["tests"],
         &["changes", "rows"],
         &["unknowns"],
@@ -2613,6 +3358,19 @@ mod tests {
         assert!(rels
             .iter()
             .any(|r| r["type"] == "CONNECTS_TO" && r["provenance"] == "declared"));
+    }
+
+    #[test]
+    fn optional_source_is_exact_and_bounded() {
+        let store = store();
+        let mut request = req("handler");
+        request.include_source = true;
+        request.max_tokens = 6000;
+        let out = get_task_context(&store, &request).unwrap();
+        let sources = out["sources"].as_array().unwrap();
+        assert!(!sources.is_empty());
+        assert!(sources[0]["source"].as_str().unwrap().contains("1\t"));
+        assert!(out["budget"]["estimated_tokens"].as_u64().unwrap() <= 6000);
     }
 
     #[test]
@@ -3095,5 +3853,294 @@ mod tests {
             .unwrap()
             .iter()
             .any(|t| t["method"] == "file"));
+    }
+
+    #[test]
+    fn dotted_identifier_is_not_a_file_path_and_plurals_match() {
+        assert!(!looks_like_path("TaskRepository.FetchByUserID"));
+        assert!(looks_like_path("repository/task_repository.go"));
+        let words = task_words("Locate the endpoint that fetches tasks for authenticated users");
+        assert!(words.iter().any(|w| w == "fetch"));
+        assert!(words.iter().any(|w| w == "task"));
+    }
+
+    fn task_store() -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        let nodes = vec![
+            node(
+                "Route",
+                "/task",
+                "__route__GET__/task",
+                "api/route/task_route.go",
+                20,
+                20,
+            ),
+            node(
+                "Function",
+                "Fetch",
+                "p.api.controller.TaskController.Fetch",
+                "api/controller/task_controller.go",
+                10,
+                20,
+            ),
+            node(
+                "Function",
+                "FetchByUserID",
+                "p.repository.task_repository.taskRepository.FetchByUserID",
+                "repository/task_repository.go",
+                10,
+                20,
+            ),
+            node(
+                "Function",
+                "FetchByUserID",
+                "p.domain.mocks.TaskRepository.TaskRepository.FetchByUserID",
+                "domain/mocks/TaskRepository.go",
+                10,
+                20,
+            ),
+            node(
+                "Function",
+                "TestFetch",
+                "p.api.controller.profile_controller_test.TestFetch",
+                "api/controller/profile_controller_test.go",
+                10,
+                20,
+            ),
+        ];
+        let edges = vec![
+            EdgeSpec::new(
+                "p.api.controller.TaskController.Fetch",
+                "__route__GET__/task",
+                "HANDLES",
+            ),
+            EdgeSpec::new(
+                "p.api.controller.TaskController.Fetch",
+                "p.repository.task_repository.taskRepository.FetchByUserID",
+                "CALLS",
+            ),
+            EdgeSpec::new(
+                "p.api.controller.profile_controller_test.TestFetch",
+                "p.api.controller.TaskController.Fetch",
+                "TESTS",
+            ),
+        ];
+        let mut write = ProjectWrite::new("p", "/tmp/p", "full", "gen-1");
+        write.nodes = &nodes;
+        write.edges = &edges;
+        store.publish(&write).unwrap();
+        store
+    }
+
+    #[test]
+    fn task_targets_prefer_production_for_a_dotted_identifier() {
+        let store = task_store();
+        let targets = task_targets(
+            &store,
+            "p",
+            "If TaskRepository.FetchByUserID changed to accept a primitive.ObjectID, which production files and tests change?",
+            8,
+        )
+        .unwrap();
+        assert!(targets
+            .iter()
+            .any(|t| t == "p.repository.task_repository.taskRepository.FetchByUserID"));
+        assert!(!targets
+            .iter()
+            .any(|t| t.contains("domain.mocks.TaskRepository")));
+    }
+
+    #[test]
+    fn task_targets_match_plural_words_to_the_route() {
+        let store = task_store();
+        let targets = task_targets(
+            &store,
+            "p",
+            "Locate the HTTP endpoint that fetches tasks for the authenticated user.",
+            8,
+        )
+        .unwrap();
+        assert!(targets.iter().any(|t| t == "__route__GET__/task"));
+    }
+
+    fn as_node(n: &NewNode) -> Node {
+        Node {
+            id: 0,
+            project: "p".into(),
+            label: n.label.clone(),
+            name: n.name.clone(),
+            qualified_name: n.qualified_name.clone(),
+            file_path: n.file_path.clone(),
+            start_line: n.start_line,
+            end_line: n.end_line,
+            properties: n.properties.clone(),
+        }
+    }
+
+    #[test]
+    fn test_coverage_marks_targets_without_a_tests_edge() {
+        let test = node(
+            "Function",
+            "TestFetch",
+            "p.api.controller.profile_controller_test.TestFetch",
+            "api/controller/profile_controller_test.go",
+            1,
+            10,
+        );
+        let controller = node(
+            "Function",
+            "Fetch",
+            "p.api.controller.TaskController.Fetch",
+            "api/controller/task_controller.go",
+            1,
+            10,
+        );
+        let repository = node(
+            "Function",
+            "FetchByUserID",
+            "p.repository.task_repository.taskRepository.FetchByUserID",
+            "repository/task_repository.go",
+            1,
+            10,
+        );
+        let entries = [
+            NodeEntry {
+                node: as_node(&controller),
+                role: "target",
+                priority: 0,
+                distance: 0,
+                provenance: "verified",
+                evidence: vec![Evidence {
+                    edge: "TESTS".into(),
+                    source: test.qualified_name.clone(),
+                    target: controller.qualified_name.clone(),
+                    direction: "inbound",
+                    provenance: "verified",
+                    confidence: None,
+                    resolved_by: None,
+                    observed: false,
+                    observed_count: 0,
+                }],
+            },
+            NodeEntry {
+                node: as_node(&repository),
+                role: "callee",
+                priority: 1,
+                distance: 1,
+                provenance: "verified",
+                evidence: vec![Evidence::target(&repository.qualified_name, "verified")],
+            },
+            NodeEntry {
+                node: as_node(&test),
+                role: "test",
+                priority: 2,
+                distance: 1,
+                provenance: "verified",
+                evidence: vec![Evidence {
+                    edge: "TESTS".into(),
+                    source: test.qualified_name.clone(),
+                    target: controller.qualified_name.clone(),
+                    direction: "outbound",
+                    provenance: "verified",
+                    confidence: None,
+                    resolved_by: None,
+                    observed: false,
+                    observed_count: 0,
+                }],
+            },
+        ];
+        let rows: Vec<&NodeEntry> = entries.iter().collect();
+        let report =
+            test_coverage_report(&gry_store::test_support::test_store(), "p", &rows).unwrap();
+        assert!(report["linked_tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["test_qn"] == test.qualified_name));
+        assert!(report["untested_targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["qn"] == repository.qualified_name));
+        assert!(!report["untested_targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["qn"] == controller.qualified_name));
+    }
+
+    #[test]
+    fn test_coverage_uses_route_variants_as_inferred_evidence() {
+        let controller = node(
+            "Function",
+            "Fetch",
+            "p.api.controller.ProfileController.Fetch",
+            "api/controller/profile_controller.go",
+            1,
+            10,
+        );
+        let route = node(
+            "Route",
+            "/profile",
+            "__route__GET__/profile",
+            "api/route/profile_route.go",
+            20,
+            20,
+        );
+        let mut route_node = as_node(&route);
+        route_node.properties = json!({"variants":[{"file_path":"api/controller/profile_controller_test.go","start_line":50,"end_line":50}]});
+        let mut controller_node = as_node(&controller);
+        controller_node.properties = json!({});
+        let entries = [
+            NodeEntry {
+                node: controller_node,
+                role: "target",
+                priority: 0,
+                distance: 0,
+                provenance: "verified",
+                evidence: vec![Evidence {
+                    edge: "HANDLES".into(),
+                    source: controller.qualified_name.clone(),
+                    target: route.qualified_name.clone(),
+                    direction: "outbound",
+                    provenance: "verified",
+                    confidence: None,
+                    resolved_by: None,
+                    observed: false,
+                    observed_count: 0,
+                }],
+            },
+            NodeEntry {
+                node: route_node,
+                role: "handled_route",
+                priority: 1,
+                distance: 1,
+                provenance: "verified",
+                evidence: vec![Evidence {
+                    edge: "HANDLES".into(),
+                    source: controller.qualified_name.clone(),
+                    target: route.qualified_name.clone(),
+                    direction: "inbound",
+                    provenance: "verified",
+                    confidence: None,
+                    resolved_by: None,
+                    observed: false,
+                    observed_count: 0,
+                }],
+            },
+        ];
+        let rows: Vec<&NodeEntry> = entries.iter().collect();
+        let report =
+            test_coverage_report(&gry_store::test_support::test_store(), "p", &rows).unwrap();
+        assert!(report["linked_test_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["file"] == "api/controller/profile_controller_test.go"));
+        assert!(!report["untested_targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["qn"] == controller.qualified_name));
     }
 }

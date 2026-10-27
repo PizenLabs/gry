@@ -309,6 +309,9 @@ struct ContextCmd {
     expected_generation: Option<String>,
     #[arg(long = "timeout-ms", default_value_t = 3000)]
     timeout_ms: u64,
+    /// Include exact source for the most relevant callables.
+    #[arg(long = "include-source")]
+    include_source: bool,
 }
 
 #[derive(Args)]
@@ -718,6 +721,7 @@ fn run(cli: &Cli, config: &Config) -> gry_core::GryResult<()> {
                 timeout_ms: cmd.timeout_ms,
                 task_id: None,
                 stage: None,
+                include_source: cmd.include_source,
             };
             print_compact(&gry_query::context::get_task_context(&store, &req)?);
             Ok(())
@@ -2336,31 +2340,65 @@ fn hook_cmd(config: &Config, cmd: &HookCmd) -> gry_core::GryResult<()> {
 fn skill_cmd(cmd: &SkillCmd) -> gry_core::GryResult<()> {
     let skill = r#"---
 name: gry
-description: Use gry's knowledge graph for structural code questions: where a symbol is defined, who calls it, call chains, architecture, impact and coverage.
+description: Use gry's knowledge graph for structural code questions: symbol ownership, callers, call chains, architecture, impact, tests and coverage.
 ---
 
 # gry code intelligence
 
-gry is a local code knowledge graph served over MCP. Prefer it over file-by-file
-exploration for structural questions.
+gry is a local code knowledge graph served over MCP. It is optional: do not call
+it for every question. Use native read/grep when the task names an exact string,
+file, or a short linear path you can locate immediately.
 
-- `search_graph` — find symbols by name, regex, BM25 or semantic query.
-- `get_code_snippet` — read a symbol's exact source by qualified name.
-- `trace_path` — callers, callees, data flow, cross-service and infrastructure paths.
-- `query_graph` — read-only Cypher for multi-hop or aggregate questions.
-- `get_architecture` — languages, packages, entry points, routes, hotspots, cycles.
-- `search_code` — literal/regex text search with graph context.
-- `get_task_context` — bounded, provenance-labeled evidence for a task (context/scout/auditor).
-- `detect_changes` — map a diff to affected symbols and tests.
-- `check_index_coverage` — verify a cited file was actually indexed; clean is not proof of completeness.
+## Choose the cheapest path
 
-Lifecycle adapters can call `gry hook <stage>` (before_plan, before_edit, after_edit,
-before_finish) with JSON on stdin. Treat `not_indexed`, `timeout`, `stale` and `not_found` as
-explicit failures, not empty results.
+- **Native first:** exact literals, known filenames, config values, comments,
+  small local searches, and a short path you already know.
+- **GRY first:** ambiguous symbol ownership, callers/implementations,
+  cross-layer or cross-service tracing, impact analysis, tests linked to a
+  symbol, and questions that need structural context across files.
+- **Hybrid:** let GRY identify the relevant symbols and files, then read exact
+  source only for material claims.
 
-Paginate with the returned offsets/cursors. Use `search_code` or grep for
-literal text, configuration values, comments and non-code files. If a result is
-ambiguous or unresolved, say so rather than guessing.
+Avoid running GRY and native search over the same scope. If a GRY result already
+gives the exact symbol, file and range, do not rediscover it.
+
+## One call for a multi-part task
+
+Call `get_task_context` first for discovery/impact/route/test questions:
+
+- `task` = the user's question; omit `project` to use the workspace root.
+- `depth: 3` for route -> controller -> use case -> repository chains.
+- `include: ["tests"]` for test or impact questions (it is added automatically
+  for tasks that mention tests, coverage, impact or change).
+- Keep `max_output_tokens` at 3200-6000. If `budget.truncated` is true, raise it
+  only when the missing part matters.
+- Read `status`, `freshness`, `evidence.complete_for_scope`, `test_coverage`
+  and `unknowns` before claiming completeness.
+
+Then read exact source with `get_code_snippet` (one call per material symbol) or
+a native read. Use `trace_path` when you need the relationship graph around one
+symbol; it returns ranges, not source, and reports candidates when a short name
+is ambiguous. Use `search_graph` with `name_pattern` for a known identifier;
+`query` is broad BM25. Use `search_code` or native grep for literals.
+
+Do not call `list_projects`, `get_graph_schema` or `check_index_coverage` as a
+setup step. They are for a real project ambiguity, query authoring, or a coverage
+doubt. Paginate only when the first page is insufficient.
+
+## MCP clients with Code Mode
+
+In OpenCode Code Mode, call `await tools.gry.get_task_context({...})` (dot form).
+Some clients fail the first GRY tool call in a fresh session with "Unknown tool";
+retry the same call once instead of calling `search` or listing projects.
+
+## Lifecycle hooks
+
+Lifecycle adapters can call `gry hook <stage>` (before_plan, before_edit,
+after_edit, before_finish) with JSON on stdin. Treat `not_indexed`, `timeout`,
+`stale` and `not_found` as explicit failures, not empty results.
+
+If a result is ambiguous, unresolved, stale or truncated, say so rather than
+guessing.
 "#;
     if cmd.install {
         // Keep the generic location, and also place the skill where Claude

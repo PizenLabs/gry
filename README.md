@@ -170,6 +170,10 @@ gry search-code my-project parse --limit 10
 # Change impact
 gry changes my-project --scope tests --base-branch main
 
+# Bounded task context and lifecycle hooks
+gry context my-project --target my-project.src.Engine.parse --profile scout
+gry hook before_edit --project my-project --target my-project.src.Engine.parse
+
 # Health check
 gry doctor
 ```
@@ -236,6 +240,27 @@ adapter writes its `mcp.servers` entry with explicit read/mutate classifications
 preserved; files that are not valid JSON are refused rather than overwritten. Other clients can be
 configured with `--config`.
 
+### Bounded context and lifecycle hooks
+
+`get_task_context` returns a small, evidence-backed payload instead of a repository dump. It
+resolves targets by qualified name, symbol name, file or bounded BM25 search, then adds callers,
+callees, imports, service relationships, coverage and optional change evidence. Every row keeps its
+source location, role, distance and provenance (`verified`, `declared`, `inferred` or `observed`).
+`max_output_tokens` is a hard limit with whole-row truncation and explicit omitted counts.
+
+Three profiles share one implementation:
+
+- `context` — focused evidence for known targets;
+- `scout` — a compact map of symbols, files and services plus follow-up queries;
+- `auditor` — changed files, checks performed, verified issues, possible risks and missing evidence.
+
+For agent runtimes, `gry hook <stage>` adapts the same engine at `before_plan`, `before_edit`,
+`after_edit` and `before_finish`. It reads JSON on stdin and returns `{hook, context, failure}`.
+Hooks are optional, time-bounded, cached by project generation and inputs, and guarded against
+recursion with `GRY_HOOK_ACTIVE`. When GRY is unavailable or a project is not indexed, the result
+says so explicitly; it is never reported as a verified empty result. Planning, permissions,
+mutation approval and execution stay in the consuming agent runtime.
+
 ## What it indexes
 
 - **Code**: definitions, fields, methods, imports, calls, usages, inheritance, decorators,
@@ -244,8 +269,11 @@ configured with `--config`.
   diagrams, and OpenAPI operations. PDFs are read for text layers only (no OCR).
 - **Configuration and packages**: JSON/YAML/TOML/INI/.env keys without values; package manifests
   for npm, Cargo, Go, PyPI, Composer, Pub, Maven, Gradle, Hex, RubyGems, and SwiftPM.
-- **Infrastructure**: Dockerfiles, Compose, Kubernetes manifests, Helm charts, Kustomize,
-  Terraform/OpenTofu, Ansible, Make, CI workflows, and deployment commands.
+- **Infrastructure**: Dockerfiles, Compose (services, networks, volumes, secrets/configs, build
+  contexts), Kubernetes manifests (workloads, services, Ingress routes, ConfigMap/Secret name
+  references), Helm charts, Kustomize, Terraform/OpenTofu (distinct resource addresses, explicit
+  references, modules), Ansible, Make, CI workflows, and deployment commands. Secret and config
+  contents are never indexed.
 - **Runtime observations**: `ingest_traces` stores observed caller→callee pairs and journeys by
   qualified name, so they survive reindexing.
 
@@ -267,8 +295,9 @@ Node labels include `Project`, `Package`, `Folder`, `File`, `Module`, `Section`,
 
 Edges include `DEFINES`, `DEFINES_METHOD`, `IMPORTS`, `CALLS`, `CALL_REFERENCE`, `USAGE`,
 `INHERITS`, `IMPLEMENTS`, `OVERRIDE`, `DECORATES`, `DATA_FLOWS`, `HTTP_CALLS`, `ASYNC_CALLS`,
-`EMITS`, `LISTENS_ON`, `HANDLES`, `SPAWNS`, `CONFIGURES`, `INFRA_MAPS`, `CONNECTS_TO`, `DEPLOYS`,
-`DEPENDS_ON`, `REFERENCES_FILE`, `MENTIONS`, `TESTS`, `SIMILAR_TO`, `SEMANTICALLY_RELATED`,
+`EMITS`, `LISTENS_ON`, `HANDLES`, `SPAWNS`, `CONFIGURES`, `INFRA_MAPS`, `CONNECTS_TO`, `ROUTES_TO`,
+`USES_CONFIG`, `USES_SECRET`, `USES_NETWORK`, `USES_VOLUME`, `DEPLOYS`, `DEPENDS_ON`,
+`REFERENCES_FILE`, `MENTIONS`, `TESTS`, `SIMILAR_TO`, `SEMANTICALLY_RELATED`,
 `FILE_CHANGES_WITH`, `HAS_BRANCH`, the `CROSS_*` family, and internal diagram/ADR edges. Every edge
 keeps provenance/confidence properties where the resolver provides them.
 

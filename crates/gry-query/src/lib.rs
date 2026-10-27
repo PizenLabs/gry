@@ -1,8 +1,10 @@
 pub mod adr;
 pub mod architecture;
 pub mod compare;
+pub mod context;
 pub mod coverage;
 pub mod cypher;
+pub mod hooks;
 pub mod impact;
 pub mod schema;
 pub mod search;

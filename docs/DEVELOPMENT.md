@@ -53,7 +53,7 @@ Development builds use `opt-level = 1` for the workspace and `opt-level = 2` for
 cargo test --workspace
 ```
 
-Current result: **123 tests pass across 19 suites** (`cargo test --workspace`, 2026-10-26).
+Current result: **186 tests pass across 10 test binaries plus doc-tests** (`cargo test --workspace`, 2026-10-27).
 
 | Area | Coverage |
 |---|---|
@@ -61,12 +61,12 @@ Current result: **123 tests pass across 19 suites** (`cargo test --workspace`, 2
 | `gry-store` | schema/publication, search, traversal, ADR/traces, artifact |
 | `gry-parse` | grammar registry, extraction (Rust/Python/JS/C), docs, config, infra, lexical fallback |
 | `gry-index` | full/delta indexing, deletion, artifact round-trip, cross-repo linking, Git-history coupling, failed/cancelled generation preservation, incremental-vs-clean consistency (Rust and C, late imports/config/docs) |
-| `gry-query` | search/snippets/outlines, Cypher (including snapshot cursors), trace, schema, coverage, compare, architecture, ADR, traces |
-| `gry-mcp` | all 17 tools, prompts, profiles, errors |
-| `gry` | index/search/search-code/status/config/delete, doctor, compact `--json`, memory budget, generic tool, stdio server, install/uninstall, async, test-impact select/publish |
+| `gry-query` | search/snippets/outlines, Cypher (including snapshot cursors), trace, schema, coverage, compare, architecture, ADR, traces, bounded context, scout/auditor, lifecycle hooks |
+| `gry-mcp` | all 18 tools, prompts, profiles, errors, context budgets |
+| `gry` | index/search/search-code/status/config/delete/context/hook, doctor, compact `--json`, memory budget, generic tool, stdio server, install/uninstall, async, test-impact select/publish |
 
-Test counts by crate: core 23, store 6, parse 31, index 8 unit + 11 integration, query 22 unit +
-2 integration, mcp 7 unit + 2 contract, cli 11.
+Test counts by crate: core 23, store 9, parse 40, index 11 unit + 14 integration, query 58 unit +
+5 integration, mcp 11 unit + 2 contract, cli 13.
 
 ## Verification checklist
 
@@ -91,11 +91,16 @@ The checklist covers:
 3. **Regression tests** for every defect fixed and every accepted limit.
 4. **Incremental consistency**: add/edit/delete/rename sequences compared with a clean full rebuild.
 5. **MCP contract tests**: initialize, tools/list, each tool success and representative failures,
-   prompts, JSON-RPC errors, pagination, cancellation.
+   prompts, JSON-RPC errors, pagination, cancellation, context budgets and unknown-project errors.
 6. **CLI tests**: first-class commands, generic tool invocation, install/uninstall, async jobs.
-7. **Clean build/install**: release build from a clean checkout, `--version`, index a fixture, serve
+7. **Context and hooks**: target resolution, deduplication, provenance, hard budget/truncation,
+   stale/timeout/not-indexed contracts, scout/auditor output, hook cache invalidation and recursion
+   guard.
+8. **Infrastructure integrity**: Compose/Kubernetes/Terraform extraction, cross-file resolution,
+   malformed-manifest isolation, and incremental-versus-clean graph equivalence.
+9. **Clean build/install**: release build from a clean checkout, `--version`, index a fixture, serve
    MCP, and run with no network access at runtime.
-8. **Scope audit**: no viewer/browser UI dependency or asset in the binary.
+10. **Scope audit**: no viewer/browser UI dependency or asset in the binary.
 
 ## Manual end-to-end smoke
 

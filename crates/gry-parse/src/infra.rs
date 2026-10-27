@@ -56,7 +56,9 @@ fn add_node(
     properties: Map<String, Value>,
 ) {
     let mut props = properties;
-    props.insert("ecosystem".to_string(), Value::String("infra".to_string()));
+    props
+        .entry("ecosystem".to_string())
+        .or_insert_with(|| Value::String("infra".to_string()));
     out.infra_nodes.push(InfraNode {
         label: label.to_string(),
         name: name.to_string(),
@@ -73,8 +75,11 @@ fn add_edge(
     source: &str,
     target: &str,
     edge_type: &str,
-    props: Map<String, Value>,
+    mut props: Map<String, Value>,
 ) {
+    props
+        .entry("ecosystem".to_string())
+        .or_insert_with(|| Value::String("infra".to_string()));
     out.infra_edges.push(InfraEdge {
         source_qn: source.to_string(),
         target_qn: target.to_string(),
@@ -267,6 +272,40 @@ fn parse_compose(rel_path: &str, source: &[u8], out: &mut FileExtract) {
         return;
     };
     let service_qn = |name: &str| format!("{rel_path}::compose/Service/-/{name}");
+    let network_qn = |name: &str| format!("{rel_path}::compose/Network/-/{name}");
+    let volume_qn = |name: &str| format!("{rel_path}::compose/Volume/-/{name}");
+    let secret_qn = |name: &str| format!("{rel_path}::compose/Secret/-/{name}");
+    let config_qn = |name: &str| format!("{rel_path}::compose/Config/-/{name}");
+
+    // Top-level declarations. These are declared resources, not inferred
+    // dependencies. Contents are never indexed.
+    for (kind, key, qn_fn) in [
+        (
+            "Network",
+            "networks",
+            &network_qn as &dyn Fn(&str) -> String,
+        ),
+        ("Volume", "volumes", &volume_qn),
+        ("Secret", "secrets", &secret_qn),
+        ("ConfigMap", "configs", &config_qn),
+    ] {
+        let Some(map) = value.get(key).and_then(Value::as_object) else {
+            continue;
+        };
+        for name in map.keys() {
+            let mut p = props(&[
+                ("kind", kind),
+                ("ecosystem", "compose"),
+                ("obj_key", name),
+                ("declared", "true"),
+            ]);
+            if kind == "Secret" || kind == "ConfigMap" {
+                p.insert("content_indexed".to_string(), Value::Bool(false));
+            }
+            add_node(out, rel_path, "Resource", name, &qn_fn(name), 0, p);
+        }
+    }
+
     for (name, service) in services {
         let mut p = props(&[
             ("kind", "Service"),
@@ -276,7 +315,49 @@ fn parse_compose(rel_path: &str, source: &[u8], out: &mut FileExtract) {
         if let Some(image) = service.get("image").and_then(Value::as_str) {
             p.insert("image".to_string(), Value::String(image.to_string()));
         }
+        if let Some(build) = service.get("build") {
+            match build {
+                Value::String(context) => {
+                    p.insert("build_context".to_string(), Value::String(context.clone()));
+                }
+                Value::Object(map) => {
+                    if let Some(context) = map.get("context").and_then(Value::as_str) {
+                        p.insert(
+                            "build_context".to_string(),
+                            Value::String(context.to_string()),
+                        );
+                    }
+                    if let Some(dockerfile) = map.get("dockerfile").and_then(Value::as_str) {
+                        p.insert(
+                            "dockerfile".to_string(),
+                            Value::String(dockerfile.to_string()),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(ports) = service.get("ports").and_then(Value::as_array) {
+            let ports: Vec<Value> = ports
+                .iter()
+                .filter_map(|port| match port {
+                    Value::String(s) => Some(Value::String(s.clone())),
+                    Value::Number(n) => Some(Value::String(n.to_string())),
+                    Value::Object(_) => port.get("published").and_then(|v| {
+                        v.as_str()
+                            .map(str::to_string)
+                            .or_else(|| v.as_u64().map(|n| n.to_string()))
+                            .map(Value::String)
+                    }),
+                    _ => None,
+                })
+                .collect();
+            if !ports.is_empty() {
+                p.insert("ports".to_string(), Value::Array(ports));
+            }
+        }
         add_node(out, rel_path, "Resource", name, &service_qn(name), 0, p);
+
         if let Some(image) = service.get("image").and_then(Value::as_str) {
             let (repo, tag, digest) = parse_image_ref(image);
             let qn = image_qn(&repo);
@@ -296,26 +377,232 @@ fn parse_compose(rel_path: &str, source: &[u8], out: &mut FileExtract) {
                 props(&[("ref", "image")]),
             );
         }
+
+        // Build context is a declared local directory reference, not proof that
+        // the service depends on every file under that directory.
+        if let Some(build) = service.get("build") {
+            let context = match build {
+                Value::String(context) => Some(context.as_str()),
+                Value::Object(map) => map.get("context").and_then(Value::as_str),
+                _ => None,
+            };
+            if let Some(context) = context {
+                let dir = normalize_rel(rel_path, context);
+                if !dir.is_empty() {
+                    add_edge(
+                        out,
+                        &service_qn(name),
+                        &format!("{FILE_PREFIX}{dir}"),
+                        "IMPORTS",
+                        props(&[("via", "compose_build"), ("context", context)]),
+                    );
+                }
+            }
+        }
+
         if let Some(depends) = service.get("depends_on") {
-            let names: Vec<String> = match depends {
+            let names: Vec<(String, Option<String>)> = match depends {
                 Value::Array(items) => items
                     .iter()
                     .filter_map(Value::as_str)
-                    .map(str::to_string)
+                    .map(|s| (s.to_string(), None))
                     .collect(),
-                Value::Object(map) => map.keys().cloned().collect(),
+                Value::Object(map) => map
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            v.get("condition")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        )
+                    })
+                    .collect(),
                 _ => Vec::new(),
             };
-            for dep in names {
+            for (dep, condition) in names {
+                let mut edge_props = props(&[("via", "compose")]);
+                if let Some(condition) = condition {
+                    edge_props.insert("condition".to_string(), Value::String(condition));
+                }
                 add_edge(
                     out,
                     &service_qn(name),
                     &service_qn(&dep),
                     "DEPENDS_ON",
+                    edge_props,
+                );
+            }
+        }
+
+        // Legacy links are declared cross-service connections.
+        for key in ["links", "external_links"] {
+            if let Some(items) = service.get(key).and_then(Value::as_array) {
+                for item in items.iter().filter_map(Value::as_str) {
+                    let target = item.split(':').next().unwrap_or(item);
+                    add_edge(
+                        out,
+                        &service_qn(name),
+                        &service_qn(target),
+                        "CONNECTS_TO",
+                        props(&[("via", key), ("declared", "true")]),
+                    );
+                }
+            }
+        }
+
+        // Network membership is declared; it is not evidence that services call
+        // each other.
+        if let Some(networks) = service.get("networks") {
+            for network in compose_names(networks) {
+                if !out
+                    .infra_nodes
+                    .iter()
+                    .any(|n| n.qualified_name == network_qn(&network))
+                {
+                    add_node(
+                        out,
+                        rel_path,
+                        "Resource",
+                        &network,
+                        &network_qn(&network),
+                        0,
+                        props(&[
+                            ("kind", "Network"),
+                            ("ecosystem", "compose"),
+                            ("declared", "false"),
+                        ]),
+                    );
+                }
+                add_edge(
+                    out,
+                    &service_qn(name),
+                    &network_qn(&network),
+                    "USES_NETWORK",
                     props(&[("via", "compose")]),
                 );
             }
         }
+
+        // Volume mounts are declared references. Bind mounts also reference a
+        // local path; named volumes reference a declared volume.
+        if let Some(volumes) = service.get("volumes").and_then(Value::as_array) {
+            for volume in volumes {
+                let (source, target, kind) = match volume {
+                    Value::String(raw) => {
+                        let mut parts = raw.split(':');
+                        let source = parts.next().unwrap_or("");
+                        let target = parts.next().unwrap_or("");
+                        (source.to_string(), target.to_string(), "bind")
+                    }
+                    Value::Object(map) => (
+                        map.get("source")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        map.get("target")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        map.get("type").and_then(Value::as_str).unwrap_or("volume"),
+                    ),
+                    _ => continue,
+                };
+                if source.is_empty() {
+                    continue;
+                }
+                if (kind == "bind" || source.starts_with('.') || source.starts_with('/'))
+                    && !target.is_empty()
+                {
+                    let dir = normalize_rel(rel_path, source.trim_start_matches('/'));
+                    if !dir.is_empty() && !is_glob_token(&dir) {
+                        add_edge(
+                            out,
+                            &service_qn(name),
+                            &format!("{FILE_PREFIX}{dir}"),
+                            "USES_VOLUME",
+                            props(&[("via", "compose"), ("mount", &target), ("kind", "bind")]),
+                        );
+                    }
+                } else {
+                    if !out
+                        .infra_nodes
+                        .iter()
+                        .any(|n| n.qualified_name == volume_qn(&source))
+                    {
+                        add_node(
+                            out,
+                            rel_path,
+                            "Resource",
+                            &source,
+                            &volume_qn(&source),
+                            0,
+                            props(&[
+                                ("kind", "Volume"),
+                                ("ecosystem", "compose"),
+                                ("declared", "false"),
+                            ]),
+                        );
+                    }
+                    add_edge(
+                        out,
+                        &service_qn(name),
+                        &volume_qn(&source),
+                        "USES_VOLUME",
+                        props(&[("via", "compose"), ("mount", &target)]),
+                    );
+                }
+            }
+        }
+
+        // Config and secret references are names only; values are never read.
+        for (key, kind, qn_fn) in [
+            (
+                "configs",
+                "ConfigMap",
+                &config_qn as &dyn Fn(&str) -> String,
+            ),
+            ("secrets", "Secret", &secret_qn),
+        ] {
+            let Some(items) = service.get(key) else {
+                continue;
+            };
+            for name_ref in compose_names(items) {
+                if !out
+                    .infra_nodes
+                    .iter()
+                    .any(|n| n.qualified_name == qn_fn(&name_ref))
+                {
+                    add_node(
+                        out,
+                        rel_path,
+                        "Resource",
+                        &name_ref,
+                        &qn_fn(&name_ref),
+                        0,
+                        props(&[
+                            ("kind", kind),
+                            ("ecosystem", "compose"),
+                            ("declared", "false"),
+                            ("content_indexed", "false"),
+                        ]),
+                    );
+                }
+                let edge_type = if kind == "Secret" {
+                    "USES_SECRET"
+                } else {
+                    "USES_CONFIG"
+                };
+                add_edge(
+                    out,
+                    &service_qn(name),
+                    &qn_fn(&name_ref),
+                    edge_type,
+                    props(&[("via", "compose")]),
+                );
+            }
+        }
+
         if let Some(env) = service.get("environment") {
             let entries: Vec<(String, String)> = match env {
                 Value::Object(map) => map
@@ -330,7 +617,7 @@ fn parse_compose(rel_path: &str, source: &[u8], out: &mut FileExtract) {
                     .collect(),
                 _ => Vec::new(),
             };
-            for (key, value) in entries {
+            for (key, value_text) in entries {
                 let eqn = env_qn(&key);
                 add_node(
                     out,
@@ -349,7 +636,7 @@ fn parse_compose(rel_path: &str, source: &[u8], out: &mut FileExtract) {
                     props(&[("strategy", "env_set"), ("source", "compose")]),
                 );
                 // Compose service addresses: another service name or host in a URL.
-                if let Some(target) = compose_target(&value, services) {
+                if let Some(target) = compose_target(&value_text, services) {
                     add_edge(
                         out,
                         &service_qn(name),
@@ -360,6 +647,38 @@ fn parse_compose(rel_path: &str, source: &[u8], out: &mut FileExtract) {
                 }
             }
         }
+
+        if let Some(env_files) = service.get("env_file") {
+            for path in compose_names(env_files) {
+                add_edge(
+                    out,
+                    &service_qn(name),
+                    &format!("{FILE_PREFIX}{}", normalize_rel(rel_path, &path)),
+                    "IMPORTS",
+                    props(&[("via", "compose_env_file")]),
+                );
+            }
+        }
+    }
+}
+
+fn compose_names(value: &Value) -> Vec<String> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                Value::String(s) => Some(s.clone()),
+                Value::Object(map) => map
+                    .get("source")
+                    .or_else(|| map.get("target"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect(),
+        Value::Object(map) => map.keys().cloned().collect(),
+        Value::String(s) => vec![s.clone()],
+        _ => Vec::new(),
     }
 }
 
@@ -380,6 +699,9 @@ fn compose_target(value: &str, services: &serde_json::Map<String, Value>) -> Opt
 /// Workload candidate for service-selector matching:
 /// `(qualified_name, kind, selector_labels, pod_labels)`.
 type K8sResource = (String, String, Vec<(String, String)>, Vec<(String, String)>);
+
+/// `(service, host, path, port)` for an Ingress routing declaration.
+type IngressRoute = (String, Option<String>, Option<String>, Option<String>);
 
 fn parse_kubernetes(rel_path: &str, source: &[u8], out: &mut FileExtract, ecosystem: Option<&str>) {
     let text = String::from_utf8_lossy(source);
@@ -494,6 +816,90 @@ fn parse_kubernetes(rel_path: &str, source: &[u8], out: &mut FileExtract, ecosys
                 );
             }
         }
+        // ConfigMap and Secret references are recorded by name only. Their
+        // contents are never read or indexed.
+        let mut config_refs: HashSet<String> = HashSet::new();
+        let mut secret_refs: HashSet<String> = HashSet::new();
+        collect_k8s_refs(&value, &mut config_refs, &mut secret_refs);
+        for name in config_refs {
+            add_edge(
+                out,
+                &qn,
+                &format!("__k8s_config__{namespace}/{name}"),
+                "USES_CONFIG",
+                props(&[("via", "kubernetes"), ("name", &name)]),
+            );
+        }
+        for name in secret_refs {
+            add_edge(
+                out,
+                &qn,
+                &format!("__k8s_secret__{namespace}/{name}"),
+                "USES_SECRET",
+                props(&[("via", "kubernetes"), ("name", &name)]),
+            );
+        }
+
+        // Ingress routing declarations. The target Service is resolved by the
+        // pipeline when it exists; otherwise a labeled placeholder keeps the
+        // declared reference visible without inventing runtime topology.
+        if kind == "Ingress" {
+            let mut routes: Vec<IngressRoute> = Vec::new();
+            if let Some(service) = value.pointer("/spec/defaultBackend/backend/service") {
+                if let Some(name) = service.get("name").and_then(Value::as_str) {
+                    routes.push((
+                        name.to_string(),
+                        None,
+                        None,
+                        service.pointer("/port/number").map(|v| v.to_string()),
+                    ));
+                }
+            }
+            if let Some(rules) = value.pointer("/spec/rules").and_then(Value::as_array) {
+                for rule in rules {
+                    let host = rule.get("host").and_then(Value::as_str);
+                    let Some(paths) = rule.pointer("/http/paths").and_then(Value::as_array) else {
+                        continue;
+                    };
+                    for path in paths {
+                        let service = path.pointer("/backend/service");
+                        let Some(name) =
+                            service.and_then(|s| s.get("name")).and_then(Value::as_str)
+                        else {
+                            continue;
+                        };
+                        routes.push((
+                            name.to_string(),
+                            host.map(str::to_string),
+                            path.get("path").and_then(Value::as_str).map(str::to_string),
+                            service
+                                .and_then(|s| s.pointer("/port/number"))
+                                .map(|v| v.to_string()),
+                        ));
+                    }
+                }
+            }
+            for (service, host, path, port) in routes {
+                let mut p = props(&[("via", "ingress")]);
+                if let Some(host) = host {
+                    p.insert("host".to_string(), Value::String(host));
+                }
+                if let Some(path) = path {
+                    p.insert("path".to_string(), Value::String(path));
+                }
+                if let Some(port) = port {
+                    p.insert("port".to_string(), Value::String(port));
+                }
+                add_edge(
+                    out,
+                    &qn,
+                    &format!("__k8s_svc__{namespace}/{service}"),
+                    "ROUTES_TO",
+                    p,
+                );
+            }
+        }
+
         let selector = value
             .pointer("/spec/selector")
             .map(|v| labels_string(Some(v)))
@@ -541,6 +947,53 @@ fn parse_kubernetes(rel_path: &str, source: &[u8], out: &mut FileExtract, ecosys
                 );
             }
         }
+    }
+}
+
+fn collect_k8s_refs(value: &Value, configs: &mut HashSet<String>, secrets: &mut HashSet<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                match key.as_str() {
+                    "configMapRef" | "configMapKeyRef" | "configMap" => {
+                        if let Some(name) = child.get("name").and_then(Value::as_str) {
+                            configs.insert(name.to_string());
+                        }
+                    }
+                    "secretRef" | "secretKeyRef" => {
+                        if let Some(name) = child.get("name").and_then(Value::as_str) {
+                            secrets.insert(name.to_string());
+                        }
+                    }
+                    "secret" => {
+                        if let Some(name) = child
+                            .get("secretName")
+                            .or_else(|| child.get("name"))
+                            .and_then(Value::as_str)
+                        {
+                            secrets.insert(name.to_string());
+                        }
+                    }
+                    "tls" => {
+                        if let Some(items) = child.as_array() {
+                            for item in items {
+                                if let Some(name) = item.get("secretName").and_then(Value::as_str) {
+                                    secrets.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                collect_k8s_refs(child, configs, secrets);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_k8s_refs(item, configs, secrets);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1385,6 +1838,34 @@ fn parse_terraform(rel_path: &str, source: &[u8], out: &mut FileExtract) {
         }
         return;
     }
+
+    // Collect declared resources first so explicit `type.name` references can
+    // be resolved without guessing. Only resource/data blocks have addresses.
+    let mut declared: Vec<(String, String, String, Regex)> = Vec::new();
+    for line in text.lines() {
+        let Some(cap) = TF_BLOCK.captures(line) else {
+            continue;
+        };
+        let block_type = cap.get(1).unwrap().as_str();
+        if block_type != "resource" && block_type != "data" {
+            continue;
+        }
+        let kind = cap.get(2).unwrap().as_str();
+        let name = cap.get(3).map(|m| m.as_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let pattern = format!(r"\b{}\.{}\b", regex::escape(kind), regex::escape(name));
+        if let Ok(re) = Regex::new(&pattern) {
+            declared.push((
+                block_type.to_string(),
+                kind.to_string(),
+                name.to_string(),
+                re,
+            ));
+        }
+    }
+
     let mut stack: Vec<String> = Vec::new();
     for (idx, line) in text.lines().enumerate() {
         let trimmed = line.trim();
@@ -1394,35 +1875,55 @@ fn parse_terraform(rel_path: &str, source: &[u8], out: &mut FileExtract) {
         }
         if let Some(cap) = TF_BLOCK.captures(line) {
             let block_type = cap.get(1).unwrap().as_str();
-            let name = cap.get(2).unwrap().as_str();
+            let kind = cap.get(2).unwrap().as_str();
+            let name = cap.get(3).map(|m| m.as_str()).unwrap_or("");
             let (label, qn) = match block_type {
-                "variable" => ("Variable", format!("terraform.variable.{name}")),
-                "resource" => ("Resource", format!("terraform.resource.{name}")),
-                "data" => ("Resource", format!("terraform.data.{name}")),
-                "module" => ("Module", format!("terraform.module.{name}")),
-                "output" => ("Variable", format!("terraform.output.{name}")),
-                "locals" => ("Module", format!("terraform.locals.{name}")),
+                "variable" => ("Variable", format!("terraform.variable.{kind}")),
+                "resource" => (
+                    "Resource",
+                    if name.is_empty() {
+                        format!("terraform.resource.{kind}")
+                    } else {
+                        format!("terraform.resource.{kind}.{name}")
+                    },
+                ),
+                "data" => (
+                    "Resource",
+                    if name.is_empty() {
+                        format!("terraform.data.{kind}")
+                    } else {
+                        format!("terraform.data.{kind}.{name}")
+                    },
+                ),
+                "module" => ("Module", format!("terraform.module.{kind}")),
+                "output" => ("Variable", format!("terraform.output.{kind}")),
+                "locals" => ("Module", format!("terraform.locals.{kind}")),
                 _ => continue,
             };
-            let kind = cap.get(3).map(|m| m.as_str()).unwrap_or("");
-            let p = props(&[
+            let mut p = props(&[
                 ("ecosystem", "terraform"),
                 ("ref", block_type),
                 ("kind", kind),
             ]);
-            if block_type == "resource" && name == "helm_release" && !kind.is_empty() {
-                add_node(
-                    out,
-                    rel_path,
-                    "Resource",
-                    kind,
-                    &qn,
-                    idx as i32 + 1,
-                    p.clone(),
-                );
-            } else {
-                add_node(out, rel_path, label, name, &qn, idx as i32 + 1, p.clone());
+            if block_type == "resource" || block_type == "data" {
+                p.insert("resource_type".to_string(), Value::String(kind.to_string()));
+                if !name.is_empty() {
+                    p.insert("resource_name".to_string(), Value::String(name.to_string()));
+                }
             }
+            add_node(
+                out,
+                rel_path,
+                label,
+                if (block_type == "resource" || block_type == "data") && !name.is_empty() {
+                    name
+                } else {
+                    kind
+                },
+                &qn,
+                idx as i32 + 1,
+                p,
+            );
             if block_type == "variable" {
                 let mut default = None;
                 for follow in text.lines().skip(idx + 1).take(30) {
@@ -1444,9 +1945,46 @@ fn parse_terraform(rel_path: &str, source: &[u8], out: &mut FileExtract) {
                     }
                 }
             }
-            stack.push(qn.clone());
-            if block_type == "resource" && name == "helm_release" {
-                // chart = "name" on a following line
+            if block_type == "module" {
+                let mut source_value = None;
+                let mut version = None;
+                for follow in text.lines().skip(idx + 1).take(30) {
+                    if follow.trim().starts_with('}') {
+                        break;
+                    }
+                    if let Some(cap) = TF_ASSIGN.captures(follow) {
+                        match cap.get(1).unwrap().as_str() {
+                            "source" => {
+                                source_value = Some(cap.get(2).unwrap().as_str().to_string())
+                            }
+                            "version" => version = Some(cap.get(2).unwrap().as_str().to_string()),
+                            _ => {}
+                        }
+                    }
+                }
+                if let Some(node) = out.infra_nodes.iter_mut().find(|n| n.qualified_name == qn) {
+                    if let Some(source) = &source_value {
+                        node.properties
+                            .insert("source".to_string(), Value::String(source.clone()));
+                    }
+                    if let Some(version) = &version {
+                        node.properties
+                            .insert("version".to_string(), Value::String(version.clone()));
+                    }
+                }
+                if let Some(source) = source_value {
+                    if source.starts_with("./") || source.starts_with("../") {
+                        add_edge(
+                            out,
+                            &qn,
+                            &format!("{FILE_PREFIX}{}", normalize_rel(rel_path, &source)),
+                            "IMPORTS",
+                            props(&[("local_name", "source"), ("via", "terraform")]),
+                        );
+                    }
+                }
+            }
+            if block_type == "resource" && kind == "helm_release" {
                 for follow in text.lines().skip(idx + 1).take(10) {
                     if let Some(cap) = TF_ASSIGN.captures(follow) {
                         if cap.get(1).unwrap().as_str() == "chart" {
@@ -1466,41 +2004,62 @@ fn parse_terraform(rel_path: &str, source: &[u8], out: &mut FileExtract) {
                     }
                 }
             }
+            stack.push(qn);
             continue;
         }
-        if let Some((source_qn, _)) = stack.last().map(|q| (q.clone(), ())) {
-            for cap in TF_REF.captures_iter(line) {
-                let ref_kind = cap.get(1).unwrap().as_str();
-                let ref_name = cap.get(2).unwrap().as_str();
-                let target = match ref_kind {
-                    "var" => format!("terraform.variable.{ref_name}"),
-                    "local" => format!("terraform.locals.{ref_name}"),
-                    "module" => format!("terraform.module.{ref_name}"),
-                    "data" | "resource" => format!("terraform.resource.{ref_name}"),
-                    _ => continue,
-                };
-                if target != source_qn {
-                    add_edge(
-                        out,
-                        &source_qn,
-                        &target,
-                        "USAGE",
-                        props(&[("via", "terraform"), ("ref", ref_kind)]),
-                    );
-                }
+        let Some(source_qn) = stack.last().cloned() else {
+            continue;
+        };
+        for cap in TF_REF.captures_iter(line) {
+            let ref_kind = cap.get(1).unwrap().as_str();
+            let ref_name = cap.get(2).unwrap().as_str();
+            let target = match ref_kind {
+                "var" => format!("terraform.variable.{ref_name}"),
+                "local" => format!("terraform.locals.{ref_name}"),
+                "module" => format!("terraform.module.{ref_name}"),
+                _ => continue,
+            };
+            if target != source_qn {
+                add_edge(
+                    out,
+                    &source_qn,
+                    &target,
+                    "USAGE",
+                    props(&[("via", "terraform"), ("ref", ref_kind)]),
+                );
             }
-            if let Some(cap) = TF_ASSIGN.captures(line) {
-                let key = cap.get(1).unwrap().as_str();
-                let value = cap.get(2).unwrap().as_str();
-                if key == "source" && value.starts_with("./") {
-                    add_edge(
-                        out,
-                        &source_qn,
-                        &format!("{FILE_PREFIX}{}", normalize_rel(rel_path, value)),
-                        "IMPORTS",
-                        props(&[("local_name", "source"), ("via", "terraform")]),
-                    );
-                }
+        }
+        // Explicit resource/data references (`aws_instance.web`).
+        for (block_type, kind, name, re) in &declared {
+            if !re.is_match(line) {
+                continue;
+            }
+            let target = if block_type == "data" {
+                format!("terraform.data.{kind}.{name}")
+            } else {
+                format!("terraform.resource.{kind}.{name}")
+            };
+            if target != source_qn {
+                add_edge(
+                    out,
+                    &source_qn,
+                    &target,
+                    "USAGE",
+                    props(&[("via", "terraform"), ("ref", block_type)]),
+                );
+            }
+        }
+        if let Some(cap) = TF_ASSIGN.captures(line) {
+            let key = cap.get(1).unwrap().as_str();
+            let value = cap.get(2).unwrap().as_str();
+            if key == "source" && (value.starts_with("./") || value.starts_with("../")) {
+                add_edge(
+                    out,
+                    &source_qn,
+                    &format!("{FILE_PREFIX}{}", normalize_rel(rel_path, value)),
+                    "IMPORTS",
+                    props(&[("local_name", "source"), ("via", "terraform")]),
+                );
             }
         }
     }
@@ -1638,6 +2197,55 @@ mod tests {
     }
 
     #[test]
+    fn compose_networks_volumes_secrets_and_build_are_declared() {
+        let src = "services:\n  api:\n    build:\n      context: ./api\n      dockerfile: Dockerfile\n    networks: [backend]\n    volumes:\n      - data:/var/lib/data\n    secrets: [db_password]\n    configs: [app_config]\n    ports: [\"8080:8080\"]\nnetworks:\n  backend: {}\nvolumes:\n  data: {}\nsecrets:\n  db_password:\n    file: ./secret.txt\nconfigs:\n  app_config:\n    file: ./config.txt\n";
+        let out = infra("deploy/docker-compose.yml", src);
+        assert!(out.infra_nodes.iter().any(|n| n.label == "Resource"
+            && n.properties.get("kind").and_then(Value::as_str) == Some("Network")
+            && n.name == "backend"));
+        assert!(out.infra_nodes.iter().any(|n| n.label == "Resource"
+            && n.properties.get("kind").and_then(Value::as_str) == Some("Volume")
+            && n.name == "data"));
+        assert!(out
+            .infra_edges
+            .iter()
+            .any(|e| e.edge_type == "USES_NETWORK"));
+        assert!(out.infra_edges.iter().any(|e| e.edge_type == "USES_VOLUME"));
+        assert!(out.infra_edges.iter().any(|e| e.edge_type == "USES_SECRET"));
+        assert!(out.infra_edges.iter().any(|e| e.edge_type == "USES_CONFIG"));
+        assert!(out
+            .infra_edges
+            .iter()
+            .any(|e| e.edge_type == "IMPORTS" && e.target_qn.contains("api")));
+        // Secret values are never collected, only names.
+        let serialized = serde_json::to_string(&out).unwrap();
+        assert!(!serialized.contains("secret.txt"));
+        assert!(!serialized.contains("config.txt"));
+    }
+
+    #[test]
+    fn kubernetes_ingress_config_and_secret_references() {
+        let src = "apiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: web\nspec:\n  tls:\n  - secretName: tls-cert\n  rules:\n  - host: api.example.com\n    http:\n      paths:\n      - path: /orders\n        pathType: Prefix\n        backend:\n          service:\n            name: api\n            port:\n              number: 8080\n---\napiVersion: v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  template:\n    spec:\n      containers:\n      - name: api\n        image: acme/api:1\n        envFrom:\n        - configMapRef:\n            name: app_config\n        - secretRef:\n            name: db_password\n        volumeMounts:\n        - name: tls\n          mountPath: /tls\n      volumes:\n      - name: tls\n        secret:\n          secretName: tls-cert\n";
+        let out = infra("deploy/web.yaml", src);
+        assert!(out
+            .infra_edges
+            .iter()
+            .any(|e| e.edge_type == "ROUTES_TO" && e.target_qn.contains("api")));
+        assert!(out
+            .infra_edges
+            .iter()
+            .any(|e| e.edge_type == "USES_CONFIG" && e.target_qn.contains("app_config")));
+        assert!(out
+            .infra_edges
+            .iter()
+            .any(|e| e.edge_type == "USES_SECRET" && e.target_qn.contains("db_password")));
+        assert!(out
+            .infra_edges
+            .iter()
+            .any(|e| e.edge_type == "USES_SECRET" && e.target_qn.contains("tls-cert")));
+    }
+
+    #[test]
     fn kubernetes_service_maps_workload() {
         let src = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n  labels:\n    app: api\nspec:\n  template:\n    metadata:\n      labels:\n        app: api\n    spec:\n      containers:\n      - name: api\n        image: acme/api:1\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: api\nspec:\n  selector:\n    app: api\n";
         let out = infra("deploy/api.yaml", src);
@@ -1754,6 +2362,54 @@ mod tests {
             .infra_edges
             .iter()
             .any(|e| e.edge_type == "DEPENDS_ON" && e.target_qn.contains("raw.users")));
+    }
+
+    #[test]
+    fn terraform_resources_have_distinct_addresses_and_references() {
+        let src = "resource \"aws_instance\" \"web\" {\n  subnet_id = aws_subnet.main.id\n}\nresource \"aws_instance\" \"worker\" {\n  subnet_id = aws_subnet.main.id\n}\nresource \"aws_subnet\" \"main\" {\n  cidr_block = \"10.0.0.0/24\"\n}\nmodule \"net\" {\n  source = \"./modules/net\"\n  version = \"1.2.3\"\n}\n";
+        let out = infra("infra/main.tf", src);
+        let web = out
+            .infra_nodes
+            .iter()
+            .find(|n| n.qualified_name == "terraform.resource.aws_instance.web")
+            .expect("web resource");
+        let worker = out
+            .infra_nodes
+            .iter()
+            .find(|n| n.qualified_name == "terraform.resource.aws_instance.worker")
+            .expect("worker resource");
+        assert_ne!(web.qualified_name, worker.qualified_name);
+        assert!(out.infra_edges.iter().any(|e| e.edge_type == "USAGE"
+            && e.source_qn == "terraform.resource.aws_instance.web"
+            && e.target_qn == "terraform.resource.aws_subnet.main"));
+        let module = out
+            .infra_nodes
+            .iter()
+            .find(|n| n.qualified_name == "terraform.module.net")
+            .expect("module");
+        assert_eq!(
+            module.properties.get("source").and_then(Value::as_str),
+            Some("./modules/net")
+        );
+        assert_eq!(
+            module.properties.get("version").and_then(Value::as_str),
+            Some("1.2.3")
+        );
+    }
+
+    #[test]
+    fn terraform_multiple_resource_types_are_kept() {
+        let src = "resource \"aws_instance\" \"frontend\" {\n  subnet_id = aws_subnet.main.id\n}\nresource \"aws_subnet\" \"main\" {\n  cidr_block = \"10.0.1.0/24\"\n}\nresource \"aws_security_group\" \"web\" {\n  name = \"web\"\n}\n";
+        let out = infra("infra/network.tf", src);
+        let qns: Vec<&str> = out
+            .infra_nodes
+            .iter()
+            .map(|n| n.qualified_name.as_str())
+            .collect();
+        assert!(
+            qns.contains(&"terraform.resource.aws_security_group.web"),
+            "{qns:?}"
+        );
     }
 
     #[test]

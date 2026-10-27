@@ -128,6 +128,11 @@ pub mod edges {
     pub const CONFIGURES: &str = "CONFIGURES";
     pub const INFRA_MAPS: &str = "INFRA_MAPS";
     pub const CONNECTS_TO: &str = "CONNECTS_TO";
+    pub const ROUTES_TO: &str = "ROUTES_TO";
+    pub const USES_CONFIG: &str = "USES_CONFIG";
+    pub const USES_SECRET: &str = "USES_SECRET";
+    pub const USES_NETWORK: &str = "USES_NETWORK";
+    pub const USES_VOLUME: &str = "USES_VOLUME";
     pub const DEPLOYS: &str = "DEPLOYS";
     pub const DEPENDS_ON: &str = "DEPENDS_ON";
     pub const REFERENCES_FILE: &str = "REFERENCES_FILE";
@@ -175,6 +180,11 @@ pub mod edges {
         CONFIGURES,
         INFRA_MAPS,
         CONNECTS_TO,
+        ROUTES_TO,
+        USES_CONFIG,
+        USES_SECRET,
+        USES_NETWORK,
+        USES_VOLUME,
         DEPLOYS,
         DEPENDS_ON,
         REFERENCES_FILE,

@@ -52,3 +52,4 @@ lcov.info
 .LSOverride
 ._*
 Thumbs.db
+eval/__pycache__/

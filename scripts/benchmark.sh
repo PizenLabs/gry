@@ -16,6 +16,8 @@ for args in \
   "search $NAME handler" \
   "query $NAME 'MATCH (f:Function) RETURN f.name LIMIT 20'" \
   "architecture $NAME --aspect overview" \
+  "context $NAME --task handler --max-tokens 1600" \
+  "hook before_plan --project $NAME --task handler --max-tokens 1600" \
   "schema $NAME"; do
   echo "--- gry $args"
   /usr/bin/time -p sh -c "$GRY $args >/dev/null" 2>&1 | tail -3

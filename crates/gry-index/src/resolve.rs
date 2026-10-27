@@ -391,15 +391,25 @@ impl Registry {
             let mut reason: &'static str = "name";
             // Receiver type / self dispatch.
             if let Some(receiver_type) = &call.receiver_type {
-                if cand
-                    .scope
-                    .last()
-                    .map(|s| s == receiver_type)
-                    .unwrap_or(false)
-                    || cand.qn.contains(&format!(".{receiver_type}."))
+                let scope_last = cand.scope.last().map(String::as_str).unwrap_or("");
+                if scope_last.eq_ignore_ascii_case(receiver_type)
+                    || cand
+                        .qn
+                        .to_ascii_lowercase()
+                        .contains(&format!(".{}.", receiver_type.to_ascii_lowercase()))
                 {
                     score += 0.40;
                     reason = "receiver_type";
+                } else if scope_last
+                    .to_ascii_lowercase()
+                    .ends_with(&receiver_type.to_ascii_lowercase())
+                {
+                    // Interface naming in Go often differs from the concrete
+                    // type only by a package/prefix (`Database` ->
+                    // `mongoDatabase`). This is a weaker signal than an exact
+                    // receiver match, and it is recorded as such.
+                    score += 0.30;
+                    reason = "receiver_suffix";
                 } else if cand.label == "Method" {
                     score -= 0.10;
                 }
@@ -441,15 +451,33 @@ impl Registry {
                 }
             }
             if cand.file_path == caller_file {
-                score += 0.35;
-                if reason == "name" {
-                    reason = "same_file";
-                }
-                if let Some(class) = &caller_class {
-                    if cand.scope.last() == Some(class) {
-                        score += 0.20;
-                        reason = "same_class";
+                // A receiver-typed call (`tc.TaskUsecase.Create`) is not a
+                // same-class call just because the caller lives in the same
+                // file. Giving the caller's own method the same-file bonus
+                // makes a recursive self-edge beat the real receiver.
+                let receiver_matches = call
+                    .receiver_type
+                    .as_deref()
+                    .map(|t| {
+                        cand.scope
+                            .last()
+                            .map(|s| s.eq_ignore_ascii_case(t))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(true);
+                if receiver_matches {
+                    score += 0.35;
+                    if reason == "name" {
+                        reason = "same_file";
                     }
+                    if let Some(class) = &caller_class {
+                        if cand.scope.last() == Some(class) {
+                            score += 0.20;
+                            reason = "same_class";
+                        }
+                    }
+                } else {
+                    score += 0.05;
                 }
             }
             if cand.module_qn == caller_module {
@@ -472,6 +500,12 @@ impl Registry {
             }
             if cand.is_test {
                 score -= 0.20;
+            }
+            // Generated doubles are implementations too, but they are not the
+            // production path a caller is asking about. Prefer the real type
+            // when an interface name lowers to both.
+            if cand.file_path.contains("mocks/") || cand.module_qn.contains(".mocks") {
+                score -= 0.15;
             }
             // Constructors bind to the type declaration.
             if call.kind == "constructor" && cand.label == labels::CLASS {

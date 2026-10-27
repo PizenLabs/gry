@@ -375,6 +375,33 @@ pub fn tools() -> Vec<ToolDef> {
             always_load: false,
         },
         ToolDef {
+            name: "get_task_context",
+            description: "Bounded, evidence-backed task context: resolve targets or a task, collect callers/callees/imports/services/changes, and return a size-limited payload with provenance. Profiles: context, scout, auditor.",
+            schema: json!({
+                "type":"object",
+                "properties":{
+                    "project":{"type":"string"},
+                    "task":{"type":"string","description":"Task description used only when targets are omitted."},
+                    "targets":{"type":"array","items":{"type":"string"},"maxItems":32,"description":"Symbols, qualified names, files, or search terms."},
+                    "profile":{"type":"string","enum":["context","scout","auditor"],"default":"context"},
+                    "depth":{"type":"integer","default":2,"minimum":1,"maximum":5},
+                    "max_nodes":{"type":"integer","default":40,"minimum":1,"maximum":120},
+                    "include":{"type":"array","items":{"type":"string","enum":["callers","callees","imports","services","tests","changes","coverage"]}},
+                    "changed_paths":{"type":"array","items":{"type":"string"},"maxItems":40,"description":"Explicit changed files; avoids Git discovery."},
+                    "expected_generation":{"type":"string","minLength":1},
+                    "timeout_ms":{"type":"integer","default":3000,"minimum":1,"maximum":30000},
+                    "max_output_tokens":{"type":"integer","default":3200,"minimum":128,"maximum":1000000},
+                    "format":{"type":"string","enum":["tree","json"],"default":"tree"}
+                },
+                "required":["project"]
+            }),
+            read_only: true,
+            destructive: false,
+            idempotent: true,
+            open_world: false,
+            always_load: false,
+        },
+        ToolDef {
             name: "detect_changes",
             description: "Map a Git diff to files, changed symbols, impacted symbols and risk. Scope tests adds test impact.",
             schema: json!({
@@ -467,6 +494,7 @@ pub fn tool_visible(profile: ToolProfile, tool: &ToolDef) -> bool {
         ToolProfile::Scout => matches!(
             tool.name,
             "search_graph"
+                | "get_task_context"
                 | "trace_path"
                 | "get_code_snippet"
                 | "get_file_outline"
@@ -500,7 +528,7 @@ pub fn tool_json(tool: &ToolDef) -> Value {
 }
 
 pub fn instructions(profile: ToolProfile) -> String {
-    let base = "gry is a local code knowledge graph of the indexed repository: functions, classes, methods, routes, calls, imports, inheritance, documentation, configuration and infrastructure. It answers structural code questions: where a symbol is defined, who calls a function, what it calls, call chains and data flow, which code a change affects, how modules fit together, and how services and deployments connect. search_graph finds symbols; trace_path follows callers, callees, data flow and infrastructure paths; get_code_snippet returns exact source; query_graph runs multi-hop Cypher; get_architecture summarizes structure; search_code combines text search with graph context; detect_changes maps the current diff to affected symbols. check_index_coverage tells whether a cited file was fully indexed. Results are paginated.";
+    let base = "gry is a local code knowledge graph of the indexed repository: functions, classes, methods, routes, calls, imports, inheritance, documentation, configuration and infrastructure. It answers structural code questions: where a symbol is defined, who calls a function, what it calls, call chains and data flow, which code a change affects, how modules fit together, and how services and deployments connect. search_graph finds symbols; trace_path follows callers, callees, data flow and infrastructure paths; get_code_snippet returns exact source; query_graph runs multi-hop Cypher; get_architecture summarizes structure; search_code combines text search with graph context; get_task_context assembles bounded task evidence with provenance (profiles: context, scout, auditor); detect_changes maps the current diff to affected symbols. check_index_coverage tells whether a cited file was fully indexed. Results are paginated.";
     match profile {
         ToolProfile::All => base.to_string(),
         ToolProfile::Analysis => format!("analysis tool profile (read-only): {base}"),

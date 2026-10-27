@@ -1,0 +1,513 @@
+{
+  "contexts": [
+    {
+      "depth": 2,
+      "estimated_tokens": 2858.0,
+      "max_nodes": 12,
+      "max_tokens": 3200,
+      "mean_ms": 10.3,
+      "output_bytes": 12462.0,
+      "p50_ms": 10.2,
+      "p95_ms": 11.2,
+      "peak_rss_mb": 12.1,
+      "project": "goca",
+      "samples": 20,
+      "statuses": [
+        "ok"
+      ],
+      "target": "goca.api.controller.task_controller.TaskController.Create",
+      "truncated": 20
+    },
+    {
+      "depth": 2,
+      "estimated_tokens": 2854.0,
+      "max_nodes": 5,
+      "max_tokens": 3200,
+      "mean_ms": 13.8,
+      "output_bytes": 12233.0,
+      "p50_ms": 13.3,
+      "p95_ms": 20.6,
+      "peak_rss_mb": 14.7,
+      "project": "gry",
+      "samples": 20,
+      "statuses": [
+        "ok"
+      ],
+      "target": "gry.crates.gry-query.src.context.get_task_context",
+      "truncated": 20
+    },
+    {
+      "depth": 2,
+      "estimated_tokens": 2822.0,
+      "max_nodes": 15,
+      "max_tokens": 3200,
+      "mean_ms": 23.3,
+      "output_bytes": 12470.0,
+      "p50_ms": 23.1,
+      "p95_ms": 25.9,
+      "peak_rss_mb": 29.8,
+      "project": "syn-medium",
+      "samples": 20,
+      "statuses": [
+        "ok"
+      ],
+      "target": "syn-medium.pkg0.f0.F0_0",
+      "truncated": 20
+    },
+    {
+      "depth": 2,
+      "estimated_tokens": 2883.0,
+      "max_nodes": 15,
+      "max_tokens": 3200,
+      "mean_ms": 81.0,
+      "output_bytes": 12744.0,
+      "p50_ms": 80.6,
+      "p95_ms": 84.9,
+      "peak_rss_mb": 107.8,
+      "project": "syn-large",
+      "samples": 10,
+      "statuses": [
+        "ok"
+      ],
+      "target": "syn-large.pkg0.f0.F0_0",
+      "truncated": 10
+    },
+    {
+      "depth": 2,
+      "estimated_tokens": 2932.0,
+      "max_nodes": 12,
+      "max_tokens": 3200,
+      "mean_ms": 15.3,
+      "output_bytes": 12992.0,
+      "p50_ms": 15.2,
+      "p95_ms": 16.4,
+      "peak_rss_mb": 16.7,
+      "project": "syn-hub",
+      "samples": 20,
+      "statuses": [
+        "ok"
+      ],
+      "target": "syn-hub.callers0.c0.C0",
+      "truncated": 20
+    },
+    {
+      "depth": 2,
+      "estimated_tokens": 917.0,
+      "max_nodes": 3,
+      "max_tokens": 3200,
+      "mean_ms": 12.3,
+      "output_bytes": 4094.0,
+      "p50_ms": 12.3,
+      "p95_ms": 13.7,
+      "peak_rss_mb": 12.7,
+      "project": "syn-deep",
+      "samples": 20,
+      "statuses": [
+        "ok"
+      ],
+      "target": "syn-deep.chain.f0.F0",
+      "truncated": 0
+    },
+    {
+      "depth": 2,
+      "estimated_tokens": 2919.0,
+      "max_nodes": 17,
+      "max_tokens": 3200,
+      "mean_ms": 13.7,
+      "output_bytes": 12862.0,
+      "p50_ms": 13.7,
+      "p95_ms": 14.3,
+      "peak_rss_mb": 13.6,
+      "project": "syn-dense",
+      "samples": 20,
+      "statuses": [
+        "ok"
+      ],
+      "target": "syn-dense.dense.dense.D0",
+      "truncated": 20
+    },
+    {
+      "depth": 2,
+      "estimated_tokens": 974.0,
+      "max_nodes": 3,
+      "max_tokens": 3200,
+      "mean_ms": 9.6,
+      "output_bytes": 4321.0,
+      "p50_ms": 9.6,
+      "p95_ms": 10.5,
+      "peak_rss_mb": 11.8,
+      "project": "syn-disconnected",
+      "samples": 20,
+      "statuses": [
+        "ok"
+      ],
+      "target": "syn-disconnected.parts.c0.g0.G0_0",
+      "truncated": 0
+    }
+  ],
+  "datasets": [
+    {
+      "deleted_files": 0,
+      "edges": 958,
+      "files": 57,
+      "index_duration_ms": 707,
+      "index_peak_rss_mb": 105.7,
+      "index_wall_ms": 719.1,
+      "kind": "real",
+      "nodes": 422,
+      "parsed_files": 57,
+      "project": "goca",
+      "reused_files": 0,
+      "root": "/Users/anvndev/Documents/Project/Benchmarks/go-backend-clean-architecture",
+      "unchanged": false
+    },
+    {
+      "deleted_files": 0,
+      "edges": 17898,
+      "files": 95,
+      "index_duration_ms": 1177,
+      "index_peak_rss_mb": 192.4,
+      "index_wall_ms": 1196.2,
+      "kind": "real",
+      "nodes": 3817,
+      "parsed_files": 95,
+      "project": "gry",
+      "reused_files": 0,
+      "root": "/Users/anvndev/Documents/Project/OpenSource/PizenLabs/gry",
+      "unchanged": false
+    },
+    {
+      "deleted_files": 0,
+      "edges": 48393,
+      "files": 2002,
+      "index_duration_ms": 1514,
+      "index_peak_rss_mb": 327.9,
+      "index_wall_ms": 1545.5,
+      "kind": "synthetic",
+      "nodes": 10047,
+      "parsed_files": 2002,
+      "project": "syn-medium",
+      "reused_files": 0,
+      "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-medium",
+      "unchanged": false
+    },
+    {
+      "deleted_files": 0,
+      "edges": 160207,
+      "files": 20002,
+      "index_duration_ms": 8703,
+      "index_peak_rss_mb": 1327.9,
+      "index_wall_ms": 8809.2,
+      "kind": "synthetic",
+      "nodes": 80207,
+      "parsed_files": 20002,
+      "project": "syn-large",
+      "reused_files": 0,
+      "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-large",
+      "unchanged": false
+    },
+    {
+      "deleted_files": 0,
+      "edges": 6023,
+      "files": 1502,
+      "index_duration_ms": 965,
+      "index_peak_rss_mb": 136.4,
+      "index_wall_ms": 978.9,
+      "kind": "synthetic",
+      "nodes": 3023,
+      "parsed_files": 1502,
+      "project": "syn-hub",
+      "reused_files": 0,
+      "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-hub",
+      "unchanged": false
+    },
+    {
+      "deleted_files": 0,
+      "edges": 6004,
+      "files": 1501,
+      "index_duration_ms": 995,
+      "index_peak_rss_mb": 145.8,
+      "index_wall_ms": 1009.1,
+      "kind": "synthetic",
+      "nodes": 3006,
+      "parsed_files": 1501,
+      "project": "syn-deep",
+      "reused_files": 0,
+      "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-deep",
+      "unchanged": false
+    },
+    {
+      "deleted_files": 0,
+      "edges": 3503,
+      "files": 2,
+      "index_duration_ms": 705,
+      "index_peak_rss_mb": 107.2,
+      "index_wall_ms": 717.9,
+      "kind": "synthetic",
+      "nodes": 157,
+      "parsed_files": 2,
+      "project": "syn-dense",
+      "reused_files": 0,
+      "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-dense",
+      "unchanged": false
+    },
+    {
+      "deleted_files": 0,
+      "edges": 3205,
+      "files": 801,
+      "index_duration_ms": 866,
+      "index_peak_rss_mb": 122.4,
+      "index_wall_ms": 878.7,
+      "kind": "synthetic",
+      "nodes": 1706,
+      "parsed_files": 801,
+      "project": "syn-disconnected",
+      "reused_files": 0,
+      "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-disconnected",
+      "unchanged": false
+    }
+  ],
+  "environment": {
+    "cpus": 8,
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "python": "3.15.0"
+  },
+  "hooks": [
+    {
+      "cached": false,
+      "cached_hits": 0,
+      "estimated_tokens": 5324.0,
+      "p50_ms": 15.3,
+      "p95_ms": 16.6,
+      "samples": 10,
+      "stage": "before_plan",
+      "statuses": [
+        "ok"
+      ]
+    },
+    {
+      "cached": true,
+      "cached_hits": 9,
+      "estimated_tokens": 5324.0,
+      "p50_ms": 9.6,
+      "p95_ms": 16.1,
+      "samples": 10,
+      "stage": "before_plan",
+      "statuses": [
+        "ok"
+      ]
+    },
+    {
+      "cached": false,
+      "cached_hits": 0,
+      "estimated_tokens": 3650.0,
+      "p50_ms": 10.2,
+      "p95_ms": 11.2,
+      "samples": 10,
+      "stage": "before_edit",
+      "statuses": [
+        "ok"
+      ]
+    },
+    {
+      "cached": true,
+      "cached_hits": 9,
+      "estimated_tokens": 3650.0,
+      "p50_ms": 9.6,
+      "p95_ms": 11.0,
+      "samples": 10,
+      "stage": "before_edit",
+      "statuses": [
+        "ok"
+      ]
+    },
+    {
+      "cached": false,
+      "cached_hits": 0,
+      "estimated_tokens": 5656.0,
+      "p50_ms": 14.3,
+      "p95_ms": 14.6,
+      "samples": 10,
+      "stage": "after_edit",
+      "statuses": [
+        "ok"
+      ]
+    },
+    {
+      "cached": true,
+      "cached_hits": 9,
+      "estimated_tokens": 5656.0,
+      "p50_ms": 9.8,
+      "p95_ms": 14.7,
+      "samples": 10,
+      "stage": "after_edit",
+      "statuses": [
+        "ok"
+      ]
+    },
+    {
+      "cached": false,
+      "cached_hits": 0,
+      "estimated_tokens": 5657.0,
+      "p50_ms": 14.3,
+      "p95_ms": 16.2,
+      "samples": 10,
+      "stage": "before_finish",
+      "statuses": [
+        "ok"
+      ]
+    },
+    {
+      "cached": true,
+      "cached_hits": 9,
+      "estimated_tokens": 5657.0,
+      "p50_ms": 10.1,
+      "p95_ms": 14.5,
+      "samples": 10,
+      "stage": "before_finish",
+      "statuses": [
+        "ok"
+      ]
+    }
+  ],
+  "incremental": [
+    {
+      "project": "syn-medium",
+      "runs": [
+        {
+          "deleted_files": 0,
+          "edges": 48393,
+          "files": 2002,
+          "index_duration_ms": 206,
+          "index_peak_rss_mb": 21.5,
+          "index_wall_ms": 217.3,
+          "kind": "synthetic",
+          "nodes": 10047,
+          "operation": "unchanged",
+          "parsed_files": 0,
+          "project": "syn-medium",
+          "reused_files": 2002,
+          "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-medium",
+          "unchanged": true
+        },
+        {
+          "deleted_files": 0,
+          "edges": 48393,
+          "files": 2002,
+          "index_duration_ms": 102,
+          "index_peak_rss_mb": 25.1,
+          "index_wall_ms": 113.1,
+          "kind": "synthetic",
+          "nodes": 10047,
+          "operation": "edit-one",
+          "parsed_files": 1,
+          "project": "syn-medium",
+          "reused_files": 2001,
+          "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-medium",
+          "unchanged": false
+        },
+        {
+          "deleted_files": 0,
+          "edges": 48396,
+          "files": 2003,
+          "index_duration_ms": 749,
+          "index_peak_rss_mb": 125.4,
+          "index_wall_ms": 762.1,
+          "kind": "synthetic",
+          "nodes": 10049,
+          "operation": "add-one",
+          "parsed_files": 1,
+          "project": "syn-medium",
+          "reused_files": 2002,
+          "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-medium",
+          "unchanged": false
+        },
+        {
+          "deleted_files": 1,
+          "edges": 48393,
+          "files": 2002,
+          "index_duration_ms": 141,
+          "index_peak_rss_mb": 44.1,
+          "index_wall_ms": 154.0,
+          "kind": "synthetic",
+          "nodes": 10047,
+          "operation": "delete-one",
+          "parsed_files": 0,
+          "project": "syn-medium",
+          "reused_files": 2002,
+          "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-medium",
+          "unchanged": false
+        }
+      ]
+    },
+    {
+      "project": "syn-large",
+      "runs": [
+        {
+          "deleted_files": 0,
+          "edges": 160207,
+          "files": 20002,
+          "index_duration_ms": 789,
+          "index_peak_rss_mb": 58.8,
+          "index_wall_ms": 804.0,
+          "kind": "synthetic",
+          "nodes": 80207,
+          "operation": "unchanged",
+          "parsed_files": 0,
+          "project": "syn-large",
+          "reused_files": 20002,
+          "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-large",
+          "unchanged": true
+        },
+        {
+          "deleted_files": 0,
+          "edges": 160207,
+          "files": 20002,
+          "index_duration_ms": 712,
+          "index_peak_rss_mb": 64.0,
+          "index_wall_ms": 727.9,
+          "kind": "synthetic",
+          "nodes": 80207,
+          "operation": "edit-one",
+          "parsed_files": 1,
+          "project": "syn-large",
+          "reused_files": 20001,
+          "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-large",
+          "unchanged": false
+        },
+        {
+          "deleted_files": 0,
+          "edges": 160210,
+          "files": 20003,
+          "index_duration_ms": 1481,
+          "index_peak_rss_mb": 289.0,
+          "index_wall_ms": 1515.8,
+          "kind": "synthetic",
+          "nodes": 80209,
+          "operation": "add-one",
+          "parsed_files": 1,
+          "project": "syn-large",
+          "reused_files": 20002,
+          "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-large",
+          "unchanged": false
+        },
+        {
+          "deleted_files": 1,
+          "edges": 160207,
+          "files": 20002,
+          "index_duration_ms": 941,
+          "index_peak_rss_mb": 219.6,
+          "index_wall_ms": 974.4,
+          "kind": "synthetic",
+          "nodes": 80207,
+          "operation": "delete-one",
+          "parsed_files": 0,
+          "project": "syn-large",
+          "reused_files": 20002,
+          "root": "/private/var/folders/0z/x6n_jq_s0qv68_1ldw38p2b00000gn/T/opencode/gry-benchrun.PywUvN/syn-large",
+          "unchanged": false
+        }
+      ]
+    }
+  ]
+}

@@ -392,7 +392,10 @@ impl Store {
         // Global nodes (EnvVar, Package, Process, ...) have an empty
         // file_path, so the file-level reconcile cannot see them. Remove the
         // ones left with no edge at all.
-        let orphan_globals = "project=?1 AND label IN
+        // Only truly global nodes (empty file_path) are pruned here. A
+        // file-scoped Resource with no edges is still a declared entity (for
+        // example a Terraform resource or a Compose volume) and must survive.
+        let orphan_globals = "project=?1 AND file_path='' AND label IN
              ('Package','EnvVar','Channel','Process','Image','Resource','Chart')
              AND id NOT IN (SELECT source_id FROM edges WHERE project=?1)
              AND id NOT IN (SELECT target_id FROM edges WHERE project=?1)";
@@ -442,6 +445,76 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// File hashes for a bounded path set. Avoids scanning the whole project
+    /// for focused queries such as context freshness checks.
+    pub fn file_hashes_for_paths(
+        &self,
+        project: &str,
+        paths: &[String],
+    ) -> StoreResult<Vec<FileHash>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for chunk in paths.chunks(400) {
+            let ph = placeholders(chunk.len());
+            let sql = format!(
+                "SELECT rel_path,sha256,mtime_ns,size FROM file_hashes
+                 WHERE project=?1 AND rel_path IN ({ph}) ORDER BY rel_path"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+            values.push(&project);
+            for path in chunk {
+                values.push(path);
+            }
+            let rows = stmt.query_map(values.as_slice(), |row| {
+                Ok(FileHash {
+                    rel_path: row.get(0)?,
+                    sha256: row.get(1)?,
+                    mtime_ns: row.get(2)?,
+                    size: row.get(3)?,
+                })
+            })?;
+            out.extend(rows.collect::<Result<Vec<_>, _>>()?);
+        }
+        Ok(out)
+    }
+
+    /// Coverage rows for a bounded path set.
+    pub fn coverage_for_paths(
+        &self,
+        project: &str,
+        paths: &[String],
+    ) -> StoreResult<Vec<CoverageRow>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for chunk in paths.chunks(400) {
+            let ph = placeholders(chunk.len());
+            let sql = format!(
+                "SELECT rel_path,kind,detail FROM index_coverage
+                 WHERE project=?1 AND rel_path IN ({ph}) ORDER BY rel_path,kind"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+            values.push(&project);
+            for path in chunk {
+                values.push(path);
+            }
+            let rows = stmt.query_map(values.as_slice(), |row| {
+                Ok(CoverageRow {
+                    rel_path: row.get(0)?,
+                    kind: row.get(1)?,
+                    detail: row.get(2)?,
+                })
+            })?;
+            out.extend(rows.collect::<Result<Vec<_>, _>>()?);
+        }
+        Ok(out)
     }
 
     // ── Publication ───────────────────────────────────────────────────
@@ -1749,7 +1822,10 @@ fn gc_delta(
     }
     // Global infrastructure nodes with no remaining edge are orphans.
     if gc_globals {
-        let orphan_globals = "project=?1 AND label IN
+        // Only truly global nodes (empty file_path) are pruned here. A
+        // file-scoped Resource with no edges is still a declared entity (for
+        // example a Terraform resource or a Compose volume) and must survive.
+        let orphan_globals = "project=?1 AND file_path='' AND label IN
              ('Package','EnvVar','Channel','Process','Image','Resource','Chart')
              AND id NOT IN (SELECT source_id FROM edges WHERE project=?1)
              AND id NOT IN (SELECT target_id FROM edges WHERE project=?1)";
@@ -1963,5 +2039,63 @@ mod tests {
             !store.nodes_by_file("p", "src/main.rs").unwrap().is_empty(),
             "surviving file lost its nodes"
         );
+    }
+
+    #[test]
+    fn bounded_path_queries_only_return_requested_rows() {
+        let store = test_store();
+        let hashes = store
+            .file_hashes_for_paths("p", &["src/lib.rs".to_string(), "missing.rs".to_string()])
+            .unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].rel_path, "src/lib.rs");
+        assert!(store
+            .coverage_for_paths("p", &["src/lib.rs".to_string()])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn orphan_prune_keeps_file_scoped_resources_without_edges() {
+        let mut store = Store::open_in_memory().unwrap();
+        let nodes = vec![
+            NewNode::new(
+                "Resource",
+                "cache",
+                "p.compose::Volume/cache",
+                "deploy/docker-compose.yml",
+                0,
+                0,
+            ),
+            NewNode::new("Resource", "orphan", "__global_resource__", "", 0, 0),
+            NewNode::new("Package", "leftover", "__package__leftover", "", 0, 0),
+        ];
+        let files = vec![FileHash {
+            rel_path: "deploy/docker-compose.yml".into(),
+            sha256: "a".into(),
+            mtime_ns: 1,
+            size: 10,
+        }];
+        let mut write = ProjectWrite::new("p", "/tmp/p", "full", "gen-1");
+        write.nodes = &nodes;
+        write.files = &files;
+        store.publish(&write).unwrap();
+        store.prune_orphan_nodes("p").unwrap();
+        assert!(
+            store
+                .nodes_by_file("p", "deploy/docker-compose.yml")
+                .unwrap()
+                .iter()
+                .any(|n| n.name == "cache"),
+            "file-scoped Resource must survive orphan pruning"
+        );
+        assert!(store
+            .node_by_qn("p", "__global_resource__")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .node_by_qn("p", "__package__leftover")
+            .unwrap()
+            .is_none());
     }
 }

@@ -38,7 +38,7 @@ macro_rules! phase {
 // Bump whenever extraction or resolution semantics change in a way that
 // existing graphs cannot represent. A mismatch forces a clean rebuild instead
 // of a delta that would preserve stale edges.
-pub const EXTRACTOR_VERSION: &str = "26";
+pub const EXTRACTOR_VERSION: &str = "36";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexRequest {
@@ -731,14 +731,33 @@ impl Drop for ProjectLock {
 }
 
 /// Write job status atomically for detached CLI workers.
+///
+/// The parent process and the detached worker (plus in-process job threads)
+/// write the same status file concurrently. Each writer therefore uses its own
+/// temporary path: a shared `.tmp` name lets one writer truncate another's
+/// in-flight file, publishing a truncated status that readers then cannot
+/// parse.
 pub fn write_job_status(config: &Config, project: &str, status: &serde_json::Value) {
+    static WRITE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = config.job_dir();
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(format!("{project}.json"));
-    let tmp = path.with_extension("json.tmp");
+    let seq = WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!("{project}.json.{}.{seq}.tmp", std::process::id()));
     if let Ok(mut file) = std::fs::File::create(&tmp) {
-        let _ = file.write_all(status.to_string().as_bytes());
-        let _ = std::fs::rename(tmp, path);
+        let written = file
+            .write_all(status.to_string().as_bytes())
+            .and_then(|()| file.sync_all());
+        if written.is_ok() {
+            if std::fs::rename(&tmp, &path).is_err() {
+                // Windows cannot replace an existing file with `rename`; fall
+                // back to an unlink-then-rename swap.
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -746,4 +765,65 @@ pub fn read_job_status(config: &Config, project: &str) -> Option<serde_json::Val
     let path = config.job_dir().join(format!("{project}.json"));
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    fn test_config(dir: &std::path::Path) -> Config {
+        Config {
+            cache_dir: dir.join("cache"),
+            db_path: dir.join("cache/graph.db"),
+            allowed_root: None,
+            workers: 1,
+            max_files: None,
+            max_source_mb: None,
+            settings: gry_core::config::RuntimeSettings::default(),
+        }
+    }
+
+    /// Concurrent writers (parent CLI + detached worker) must never publish a
+    /// partial status file that readers cannot parse.
+    #[test]
+    fn concurrent_job_status_writes_stay_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Arc::new(test_config(dir.path()));
+        let done = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::new();
+        for writer in 0..8 {
+            let config = config.clone();
+            let done = done.clone();
+            handles.push(std::thread::spawn(move || {
+                for seq in 0..200 {
+                    let status = serde_json::json!({
+                        "project": "concurrent",
+                        "state": if writer % 2 == 0 { "running" } else { "succeeded" },
+                        "writer": writer,
+                        "seq": seq,
+                        "padding": "x".repeat(4096),
+                    });
+                    write_job_status(&config, "concurrent", &status);
+                }
+                done.store(true, Ordering::Relaxed);
+            }));
+        }
+        let mut reads = 0;
+        let path = config.job_dir().join("concurrent.json");
+        while !done.load(Ordering::Relaxed) {
+            if let Ok(bytes) = std::fs::read(&path) {
+                let status: serde_json::Value = serde_json::from_slice(&bytes)
+                    .unwrap_or_else(|e| panic!("corrupt status ({e}): {bytes:?}"));
+                assert_eq!(status["project"], "concurrent");
+                reads += 1;
+            }
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let final_status = read_job_status(&config, "concurrent").expect("final status readable");
+        assert_eq!(final_status["project"], "concurrent");
+        assert!(reads > 0, "reader never observed a published status");
+    }
 }

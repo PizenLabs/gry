@@ -13,7 +13,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 static TYPE_ASSIGN_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?:=|:=)\s*(?:&(?:mut\s+)?)?(?:[a-z_][a-z0-9_]*::)*([A-Z][A-Za-z0-9_]*)").unwrap()
+    Regex::new(r"(?:=|:=)\s*(?:&(?:mut\s+)?)?(?:[a-z_][a-z0-9_]*(?:::|\.))*([A-Z][A-Za-z0-9_]*)")
+        .unwrap()
 });
 static FILE_PATH_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"["'](/[^"']*)["']"#).unwrap());
 static RUST_MACRO_CALL_RE: Lazy<Regex> = Lazy::new(|| {
@@ -284,12 +285,18 @@ impl<'a> Extractor<'a> {
                 self.build_def(node, scope, container, label, is_function, &all_decorators)
             {
                 let name = def.name.clone();
+                let def_scope = def.scope.clone();
                 if !name.is_empty() {
                     let key = (def.label.clone(), def.start_line);
                     if self.seen_defs.insert(key) {
                         self.defs.push(def);
                     }
-                    // Recurse into the declaration's body with the symbol scope.
+                    // Recurse into the declaration's body with the symbol
+                    // scope. Qualified declarations (Go receiver types, C++
+                    // namespaces) contribute extra scope segments, and calls
+                    // inside the body must resolve to the same QN.
+                    let base_len = scope.len();
+                    scope.extend(def_scope.iter().skip(base_len).cloned());
                     scope.push(name);
                     let next_container = if is_function {
                         container
@@ -305,7 +312,7 @@ impl<'a> Extractor<'a> {
                     for c in node.named_children(&mut child) {
                         self.walk(c, scope, next_container, in_function || is_function, &[]);
                     }
-                    scope.pop();
+                    scope.truncate(base_len);
                     return;
                 }
             }
@@ -447,8 +454,10 @@ impl<'a> Extractor<'a> {
                 name = short;
             }
         }
-        // Go methods: receiver type belongs to the QN scope.
-        if self.lang.name == "go" && label == "Method" {
+        // Go methods: receiver type belongs to the QN scope. The generic
+        // function classifier labels Go methods as Function, so key off the
+        // node kind as well as the label.
+        if self.lang.name == "go" && (label == "Method" || node.kind() == "method_declaration") {
             if let Some(recv) = node.child_by_field_name("receiver") {
                 let r = simple_type_name(text(self.source, recv));
                 if !r.is_empty() && !def_scope.contains(&r) {
@@ -753,7 +762,7 @@ impl<'a> Extractor<'a> {
             });
         }
         // Route registration calls are not outbound HTTP calls.
-        let route_registration = route_from_call(call, self.lang.name);
+        let route_registration = route_from_call(call, self.lang.name, &self.type_map);
         if let Some(route) = route_registration {
             self.routes.push(route);
         } else if let Some(url) = call
@@ -1132,12 +1141,15 @@ fn first_line(text: &str, max: usize) -> String {
 }
 
 fn simple_type_name(raw: &str) -> String {
-    let raw = raw.trim().trim_matches(['&', '*', ' ', '!']);
+    let raw = raw.trim().trim_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '&' | '*' | '!' | '(' | ')' | '[' | ']')
+    });
     let last = raw
         .split(['.', ':', '<', ' ', ',', '>', '[', ']'])
         .rfind(|s| !s.is_empty())
         .unwrap_or(raw);
-    last.to_string()
+    last.trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
+        .to_string()
 }
 
 fn split_qualified_name(name: &str) -> Option<(String, String)> {
@@ -1234,6 +1246,13 @@ fn parse_call(
                 .get(r)
                 .cloned()
                 .or_else(|| type_map.get(r.trim_start_matches("&")).cloned())
+                .or_else(|| {
+                    // Field access on a receiver: `tc.TaskUsecase.Create`.
+                    // The struct field's declared type is the receiver type we
+                    // need; Go interface calls have no other type evidence.
+                    let field = r.rsplit('.').next().unwrap_or(r);
+                    type_map.get(field).cloned()
+                })
                 .or_else(|| {
                     let base = r.split('(').next().unwrap_or(r).trim();
                     let base = base.rsplit(['.', ':']).next().unwrap_or(base);
@@ -2098,13 +2117,18 @@ fn route_from_decorator(node: Node<'_>, source: &[u8], scope: &[String]) -> Opti
         method,
         path,
         handler: scope.last().cloned(),
+        handler_type: None,
         line: line(node),
         framework: "decorator".to_string(),
         scope: scope.to_vec(),
     })
 }
 
-fn route_from_call(call: &CallSite, _lang: &str) -> Option<RouteDef> {
+fn route_from_call(
+    call: &CallSite,
+    lang: &str,
+    type_map: &HashMap<String, String>,
+) -> Option<RouteDef> {
     let path = call.args.first().and_then(|a| literal_string(a))?;
     if !path.starts_with('/') && !path.starts_with("http") {
         return None;
@@ -2116,7 +2140,11 @@ fn route_from_call(call: &CallSite, _lang: &str) -> Option<RouteDef> {
         || receiver.contains("route")
         || receiver.contains("server")
         || receiver.contains("mux")
-        || receiver.contains("api");
+        || receiver.contains("api")
+        || receiver.contains("group")
+        // Common Gin/Echo receiver names. Exact matches keep an HTTP client
+        // called `client` or `request` from being treated as a router.
+        || matches!(receiver.as_str(), "r" | "g" | "e" | "engine");
     let method = match name.as_str() {
         "get" | "post" | "put" | "patch" | "delete" | "head" | "options" => {
             Some(name.to_ascii_uppercase())
@@ -2124,18 +2152,58 @@ fn route_from_call(call: &CallSite, _lang: &str) -> Option<RouteDef> {
         "handlefunc" | "handle" | "route" | "mapget" | "mappost" => Some("ANY".to_string()),
         _ => None,
     }?;
-    if !routeish_receiver && name != "handlefunc" && name != "route" {
+    // Registration takes a handler expression. A call with two arguments where
+    // the second is a plain callable reference is a route even when the
+    // receiver variable is named `r`, `group`, or `publicRouter`. An outbound
+    // HTTP call has no handler argument (or passes a body expression).
+    let handler_arg = call
+        .args
+        .get(1)
+        .map(|a| a.trim())
+        .filter(|a| is_handler_reference(a));
+    // A non-router receiver is only a route when the second argument is a
+    // qualified method reference (`s.healthHandler`, `tc.Create`) in Go.
+    // This keeps `client.Post("/x", body)` out of the route table.
+    let qualified_handler = lang == "go" && handler_arg.map(|a| a.contains('.')).unwrap_or(false);
+    if !routeish_receiver && !qualified_handler && name != "handlefunc" && name != "route" {
         return None;
     }
     let handler = call.args.get(1).map(|a| extract_callable_name(a));
+    let handler_type = handler_arg.and_then(|raw| {
+        let receiver = raw.rsplit_once('.')?.0.trim();
+        type_map.get(receiver).cloned().or_else(|| {
+            (receiver.chars().next().is_some_and(char::is_uppercase)).then(|| receiver.to_string())
+        })
+    });
     Some(RouteDef {
         method,
         path,
         handler,
+        handler_type,
         line: call.line,
         framework: receiver,
         scope: call.scope.clone(),
     })
+}
+
+/// A handler argument is a symbol reference, not a literal or a body/value
+/// expression. This is what separates `r.POST("/x", tc.Create)` from
+/// `client.POST("/x", body)` and `http.Post("/x", "application/json", buf)`.
+fn is_handler_reference(raw: &str) -> bool {
+    let raw = raw.trim();
+    if raw.is_empty()
+        || raw.starts_with('"')
+        || raw.starts_with('\'')
+        || raw.starts_with('&')
+        || raw.contains('(')
+        || raw.contains('{')
+        || raw.contains('=')
+        || raw.contains(',')
+    {
+        return false;
+    }
+    raw.chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '-' | '>'))
 }
 
 fn parse_route_text(raw: &str) -> Option<(String, String)> {
@@ -2407,7 +2475,10 @@ fn collect_type_map(node: Node<'_>, source: &[u8], out: &mut HashMap<String, Str
                         .map(|m| m.as_str().to_string())
                 });
             if let (Some(name), Some(type_name)) = (name, type_name) {
-                if !name.is_empty() && !type_name.is_empty() && name != type_name {
+                // A struct field may legitimately have the same name as its
+                // interface type (`TaskUsecase domain.TaskUsecase`). Skipping
+                // that case breaks interface dispatch resolution.
+                if !name.is_empty() && !type_name.is_empty() {
                     out.insert(name, type_name);
                 }
             }
@@ -2638,6 +2709,96 @@ func (s *Server) RegisterRoutes() {
         assert!(
             !out.env_accesses.iter().any(|env| env.key == "/health"),
             "r.GET(\"/health\") must not be recorded as an environment read"
+        );
+    }
+
+    #[test]
+    fn go_interface_field_calls_carry_the_field_type() {
+        let src = r#"
+package controller
+
+type TaskController struct {
+    TaskUsecase domain.TaskUsecase
+}
+
+func (tc *TaskController) Create(c *gin.Context) {
+    tc.TaskUsecase.Create(c, &task)
+}
+"#;
+        let out = extract("api/controller/task_controller.go", src);
+        let call = out
+            .calls
+            .iter()
+            .find(|c| c.name == "Create" && c.receiver.as_deref() == Some("tc.TaskUsecase"))
+            .expect("interface field call was not extracted");
+        assert_eq!(call.receiver_type.as_deref(), Some("TaskUsecase"));
+    }
+
+    #[test]
+    fn non_router_http_client_call_is_not_a_route() {
+        let src = r#"
+package client
+
+func Send(c *http.Client, body []byte) {
+    c.Post("/relative", body)
+    c.Get("/relative")
+}
+"#;
+        let out = extract("client/send.go", src);
+        assert!(
+            out.routes.is_empty(),
+            "HTTP client calls became routes: {:?}",
+            out.routes
+        );
+        assert!(!out.http_calls.is_empty(), "outbound calls were lost");
+    }
+
+    #[test]
+    fn go_route_handler_type_survives_multiline_wiring() {
+        let src = r#"
+package route
+
+func NewTaskRouter(env *bootstrap.Env, timeout time.Duration, db mongo.Database, group *gin.RouterGroup) {
+    tr := repository.NewTaskRepository(db, domain.CollectionTask)
+    tc := &controller.TaskController{
+        TaskUsecase: usecase.NewTaskUsecase(tr, timeout),
+    }
+    group.GET("/task", tc.Fetch)
+    group.POST("/task", tc.Create)
+}
+"#;
+        let out = extract("api/route/task_route.go", src);
+        let route = out
+            .routes
+            .iter()
+            .find(|r| r.path == "/task" && r.method == "POST")
+            .expect("POST /task was not extracted");
+        assert_eq!(route.handler.as_deref(), Some("Create"));
+        assert_eq!(route.handler_type.as_deref(), Some("TaskController"));
+    }
+
+    #[test]
+    fn go_router_group_registration_is_a_route_with_its_handler() {
+        let src = r#"
+package route
+
+func NewTaskRouter(group *gin.RouterGroup) {
+    tc := &controller.TaskController{}
+    group.POST("/task", tc.Create)
+}
+"#;
+        let out = extract("api/route/task_route.go", src);
+        let route = out
+            .routes
+            .iter()
+            .find(|r| r.path == "/task")
+            .expect("route registration was not extracted");
+        assert_eq!(route.method, "POST");
+        assert_eq!(route.handler.as_deref(), Some("Create"));
+        assert_eq!(route.handler_type.as_deref(), Some("TaskController"));
+        assert!(
+            out.http_calls.is_empty(),
+            "route registration must not become an outbound HTTP call"
         );
     }
 

@@ -13,6 +13,9 @@ use gry_parse::model::{FileExtract, InfraNode};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 
+// (file, handler name, handler receiver type, route QN, route scope)
+type RouteHandlerRef = (String, String, Option<String>, String, Vec<String>);
+
 pub struct ParsedFile {
     pub discovered: DiscoveredFile,
     pub extract: FileExtract,
@@ -111,7 +114,8 @@ pub fn build(parsed: &[ParsedFile], options: &BuildOptions) -> BuildResult {
         .as_ref()
         .map(|p| p.external_symbols.clone())
         .unwrap_or_default();
-    let mut route_handlers: Vec<(String, String, String, Vec<String>)> = Vec::new();
+    // (file, handler name, handler receiver type, route QN, route scope)
+    let mut route_handlers: Vec<RouteHandlerRef> = Vec::new();
     let mut openapi_handlers: Vec<(String, String)> = Vec::new();
     let mut adr_nodes: Vec<(String, String, Option<String>)> = Vec::new();
 
@@ -294,7 +298,13 @@ pub fn build(parsed: &[ParsedFile], options: &BuildOptions) -> BuildResult {
                 .clone()
                 .or_else(|| route.scope.last().cloned())
                 .unwrap_or_default();
-            route_handlers.push((rel.clone(), handler, qn, route.scope.clone()));
+            route_handlers.push((
+                rel.clone(),
+                handler,
+                route.handler_type.clone(),
+                qn,
+                route.scope.clone(),
+            ));
         }
 
         // OpenAPI operations.
@@ -785,7 +795,7 @@ pub fn build(parsed: &[ParsedFile], options: &BuildOptions) -> BuildResult {
     crate::phase!("  inheritance/decorators", phase_start);
     let phase_start = std::time::Instant::now();
     // Route handlers and OpenAPI operation handlers.
-    for (rel, handler, route_qn, scope) in route_handlers {
+    for (rel, handler, handler_type, route_qn, scope) in route_handlers {
         let module_qn = parsed
             .iter()
             .find(|f| f.discovered.rel_path == rel)
@@ -797,6 +807,24 @@ pub fn build(parsed: &[ParsedFile], options: &BuildOptions) -> BuildResult {
                 .iter()
                 .find(|s| s.file_path == rel && s.name == handler)
                 .map(|s| s.qn.clone());
+        }
+        // A route registered from another file names its handler through a
+        // receiver (`tc.Create`). The receiver type disambiguates the many
+        // short `Create`/`Fetch` methods that a Go repository has.
+        if target.is_none() {
+            if let Some(handler_type) = handler_type.as_deref() {
+                let mut matches = symbols
+                    .iter()
+                    .filter(|s| {
+                        s.name == handler
+                            && s.scope.last().map(String::as_str) == Some(handler_type)
+                    })
+                    .map(|s| s.qn.clone());
+                let first = matches.next();
+                if matches.next().is_none() {
+                    target = first;
+                }
+            }
         }
         if target.is_none() && !scope.is_empty() {
             let qn = qn_symbol(
@@ -918,21 +946,23 @@ pub fn build(parsed: &[ParsedFile], options: &BuildOptions) -> BuildResult {
     // Pass 4: infra edges with placeholder resolution.
     for file in parsed {
         for edge in &file.extract.infra_edges {
-            let source = resolve_infra_qn(
+            let Some(source) = resolve_infra_qn(
                 &mut builder,
                 &options.project,
                 &file.discovered.rel_path,
                 &edge.source_qn,
-            );
-            let target = resolve_infra_qn(
+            ) else {
+                continue;
+            };
+            let Some(target) = resolve_infra_qn(
                 &mut builder,
                 &options.project,
                 &file.discovered.rel_path,
                 &edge.target_qn,
-            );
-            if let (Some(source), Some(target)) = (source, target) {
-                builder.add_edge(&source, &target, &edge.edge_type, edge.properties.clone());
-            }
+            ) else {
+                continue;
+            };
+            builder.add_edge(&source, &target, &edge.edge_type, edge.properties.clone());
         }
     }
 
@@ -1244,23 +1274,72 @@ fn resolve_infra_qn(
         return None;
     }
     if let Some(rest) = qn.strip_prefix("__k8s_svc__") {
-        let (ns, name) = rest.split_once('/').unwrap_or(("-", rest));
-        for (candidate, node) in &builder.nodes {
-            if node.label == labels::RESOURCE
+        return resolve_k8s_reference(builder, rel, rest, "Service", qn);
+    }
+    if let Some(rest) = qn.strip_prefix("__k8s_config__") {
+        return resolve_k8s_reference(builder, rel, rest, "ConfigMap", qn);
+    }
+    if let Some(rest) = qn.strip_prefix("__k8s_secret__") {
+        return resolve_k8s_reference(builder, rel, rest, "Secret", qn);
+    }
+    Some(qn.to_string())
+}
+
+/// Resolve a declared Kubernetes reference to a resource node already added in
+/// pass 1, or materialize a clearly labeled placeholder. All nodes are added
+/// before edges are resolved, so cross-file references resolve deterministically.
+fn resolve_k8s_reference(
+    builder: &mut GraphBuilder,
+    rel: &str,
+    rest: &str,
+    kind: &str,
+    qn: &str,
+) -> Option<String> {
+    let (ns, name) = rest.split_once('/').unwrap_or(("-", rest));
+    let mut candidates: Vec<&String> = builder
+        .nodes
+        .iter()
+        .filter(|(_, node)| {
+            node.label == labels::RESOURCE
+                && matches!(
+                    node.properties.get("ecosystem").and_then(Value::as_str),
+                    Some("kubernetes") | Some("helm")
+                )
                 && node.name == name
+                && node
+                    .properties
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .map(|k| k == kind)
+                    .unwrap_or(false)
                 && node
                     .properties
                     .get("namespace")
                     .and_then(Value::as_str)
                     .map(|n| n == ns)
                     .unwrap_or(ns == "-")
-                && node.properties.get("kind").and_then(Value::as_str) == Some("Service")
-            {
-                return Some(candidate.clone());
-            }
-        }
-        return None;
+        })
+        .map(|(candidate, _)| candidate)
+        .collect();
+    candidates.sort();
+    if let Some(candidate) = candidates.first() {
+        return Some((*candidate).clone());
     }
+    let mut p = props(&[
+        ("kind", kind),
+        ("namespace", ns),
+        ("placeholder", "true"),
+        ("content_indexed", "false"),
+        ("source", "kubernetes"),
+        ("ecosystem", "kubernetes"),
+    ]);
+    p.insert(
+        "note".to_string(),
+        Value::String(
+            "Declared manifest reference without a parsed definition in this project.".to_string(),
+        ),
+    );
+    builder.add_node(labels::RESOURCE, name, qn, rel, 0, 0, p);
     Some(qn.to_string())
 }
 

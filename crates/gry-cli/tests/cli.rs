@@ -166,7 +166,7 @@ fn generic_tool_and_serve_stdio() {
         .iter()
         .filter_map(|m| m["result"]["tools"].as_array().map(Vec::len))
         .sum();
-    assert_eq!(tool_pages, 17);
+    assert_eq!(tool_pages, 18);
     assert!(messages.iter().any(|m| m["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or("")
@@ -467,9 +467,11 @@ fn async_index_and_status() {
         ],
     );
     assert_eq!(queued["state"], "queued");
+    // Poll immediately: the status file is published before the worker is
+    // spawned, so the first poll must already observe the job.
     let mut succeeded = false;
-    for _ in 0..40 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
         let status = run(
             &cache,
             &[
@@ -480,16 +482,52 @@ fn async_index_and_status() {
                 "--status",
             ],
         );
-        let state = status["state"].as_str().unwrap_or("");
-        if state == "succeeded" {
-            succeeded = true;
+        match status["state"].as_str().unwrap_or("") {
+            "succeeded" => {
+                succeeded = true;
+                break;
+            }
+            "failed" | "cancelled" => panic!("async index {status}"),
+            _ => {}
+        }
+        if std::time::Instant::now() >= deadline {
             break;
         }
-        if state == "failed" {
-            panic!("async index failed: {status}");
-        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
     assert!(succeeded, "async index did not finish");
+}
+
+#[test]
+fn index_status_reports_a_failed_job() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    let jobs = cache.join("jobs");
+    fs::create_dir_all(&jobs).unwrap();
+    fs::write(
+        jobs.join("cli-failed.json"),
+        json!({
+            "project": "cli-failed",
+            "state": "failed",
+            "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": "2026-01-01T00:00:01Z",
+            "error": "boom",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let status = run(
+        &cache,
+        &[
+            "index",
+            root.to_str().unwrap(),
+            "--name",
+            "cli-failed",
+            "--status",
+        ],
+    );
+    assert_eq!(status["state"], "failed");
+    assert_eq!(status["error"], "boom");
 }
 
 #[test]
@@ -593,4 +631,217 @@ fn test_impact_select_and_publish() {
     assert!(out.join("graph.db.zst").is_file());
     assert!(out.join("receipt.json").is_file());
     assert_eq!(receipt["commit"], commit);
+}
+
+#[test]
+fn freshness_recovers_after_incremental_reindex() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    run(
+        &cache,
+        &["index", root.to_str().unwrap(), "--name", "cli-fresh"],
+    );
+
+    let clean = run(
+        &cache,
+        &[
+            "context",
+            "cli-fresh",
+            "--target",
+            "parse",
+            "--max-tokens",
+            "2000",
+        ],
+    );
+    assert_eq!(clean["status"], "ok");
+    assert_eq!(clean["evidence"]["complete_for_scope"], true);
+
+    write(&root, "src/added.rs", "pub fn added() {}\n");
+    let stale = run(
+        &cache,
+        &[
+            "context",
+            "cli-fresh",
+            "--target",
+            "parse",
+            "--max-tokens",
+            "2000",
+        ],
+    );
+    assert_eq!(stale["status"], "stale");
+    assert_eq!(stale["evidence"]["complete_for_scope"], false);
+    assert!(stale["freshness"]["added_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p == "src/added.rs"));
+
+    run(
+        &cache,
+        &["index", root.to_str().unwrap(), "--name", "cli-fresh"],
+    );
+    let recovered = run(
+        &cache,
+        &[
+            "context",
+            "cli-fresh",
+            "--target",
+            "parse",
+            "--max-tokens",
+            "2000",
+        ],
+    );
+    assert_eq!(recovered["status"], "ok");
+    assert_eq!(recovered["evidence"]["complete_for_scope"], true);
+    assert!(recovered["freshness"]["added_paths"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(recovered["freshness"]["freshness"], "fresh");
+}
+
+#[test]
+fn context_and_lifecycle_hooks_are_bounded_and_explicit() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    run(
+        &cache,
+        &["index", root.to_str().unwrap(), "--name", "cli-context"],
+    );
+
+    let context = run(
+        &cache,
+        &[
+            "context",
+            "cli-context",
+            "--target",
+            "parse",
+            "--profile",
+            "scout",
+            "--max-tokens",
+            "800",
+        ],
+    );
+    assert_eq!(context["status"], "ok");
+    assert_eq!(context["profile"], "scout");
+    assert!(context["budget"]["estimated_tokens"].as_u64().unwrap() <= 800);
+    assert_eq!(context["evidence"]["query_ok"], true);
+    assert_eq!(context["evidence"]["repository_scan"], false);
+    assert_eq!(context["evidence"]["repository_complete"], false);
+    assert!(context["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["name"] == "parse"));
+
+    // A file added after indexing must not be presented as verified current
+    // evidence. The CLI and MCP share one payload, so this also pins the
+    // external contract.
+    std::fs::write(root.join("src/added.rs"), "pub fn added() {}\n").unwrap();
+    let added = run(
+        &cache,
+        &[
+            "context",
+            "cli-context",
+            "--target",
+            "parse",
+            "--max-tokens",
+            "1600",
+        ],
+    );
+    assert_eq!(added["status"], "stale");
+    assert_eq!(added["evidence"]["complete_for_scope"], false);
+    assert!(added["freshness"]["added_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p == "src/added.rs"));
+    std::fs::remove_file(root.join("src/added.rs")).unwrap();
+
+    let first = run(
+        &cache,
+        &[
+            "hook",
+            "before_edit",
+            "--project",
+            "cli-context",
+            "--target",
+            "parse",
+            "--max-tokens",
+            "800",
+        ],
+    );
+    assert_eq!(first["hook"]["status"], "ok");
+    assert_eq!(first["hook"]["cached"], false);
+    let second = run(
+        &cache,
+        &[
+            "hook",
+            "before_edit",
+            "--project",
+            "cli-context",
+            "--target",
+            "parse",
+            "--max-tokens",
+            "800",
+        ],
+    );
+    assert_eq!(second["hook"]["cached"], true);
+
+    let missing = run(
+        &cache,
+        &[
+            "hook",
+            "before_plan",
+            "--project",
+            "not-indexed",
+            "--target",
+            "x",
+        ],
+    );
+    assert_eq!(missing["hook"]["status"], "not_indexed");
+    assert_eq!(missing["failure"]["code"], "not_indexed");
+    assert!(missing["context"].is_null());
+
+    let recursive = Command::new(bin())
+        .arg("--cache-dir")
+        .arg(&cache)
+        .env("GRY_HOOK_ACTIVE", "1")
+        .args([
+            "hook",
+            "before_edit",
+            "--project",
+            "cli-context",
+            "--target",
+            "parse",
+        ])
+        .output()
+        .unwrap();
+    assert!(recursive.status.success());
+    let recursive: Value = serde_json::from_slice(&recursive.stdout).unwrap();
+    assert_eq!(recursive["hook"]["status"], "unavailable");
+    assert_eq!(recursive["failure"]["code"], "recursive_hook");
+}
+
+#[test]
+fn context_unknown_project_fails_with_a_typed_error() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    run(
+        &cache,
+        &[
+            "index",
+            root.to_str().unwrap(),
+            "--name",
+            "cli-context-error",
+        ],
+    );
+    let output = Command::new(bin())
+        .arg("--cache-dir")
+        .arg(&cache)
+        .args(["context", "missing-project", "--target", "parse"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("project not found or not indexed"));
 }

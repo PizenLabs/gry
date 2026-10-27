@@ -790,3 +790,348 @@ fn cross_repo_links_routes_and_channels() {
     let edges = store.all_edges(&a.project).unwrap();
     assert!(edges.iter().any(|e| e.edge_type.starts_with("CROSS_")));
 }
+
+fn write_infra_fixture(root: &Path) {
+    write(
+        root,
+        "src/lib.rs",
+        "pub fn handler() -> usize { 1 }\nfn main() { handler(); }\n",
+    );
+    write(
+        root,
+        "deploy/docker-compose.yml",
+        r#"services:
+  api:
+    image: acme/api:1
+    networks: [backend]
+    secrets: [db_password]
+    depends_on: [db]
+  db:
+    image: postgres:16
+    networks: [backend]
+networks:
+  backend: {}
+secrets:
+  db_password:
+    file: ./db_password.txt
+"#,
+    );
+    write(
+        root,
+        "deploy/k8s.yaml",
+        r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: acme/api:1
+        envFrom:
+        - configMapRef:
+            name: app_config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector:
+    app: api
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+spec:
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /orders
+        backend:
+          service:
+            name: api
+            port:
+              number: 8080
+"#,
+    );
+    write(
+        root,
+        "infra/main.tf",
+        r#"resource "aws_instance" "web" {
+  subnet_id = aws_subnet.main.id
+}
+resource "aws_subnet" "main" {
+  cidr_block = "10.0.0.0/24"
+}
+"#,
+    );
+}
+
+#[test]
+fn incremental_infrastructure_matches_clean_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    write_infra_fixture(&root);
+    let cfg = config(dir.path());
+    let indexer = Indexer::new(cfg.clone());
+    indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+
+    // Mutate every supported manifest family: rename services/resources,
+    // remove a secret, remove the Ingress, and rename a Terraform file.
+    write(
+        &root,
+        "deploy/docker-compose.yml",
+        r#"services:
+  api:
+    image: acme/api:2
+    networks: [data]
+    volumes:
+      - cache:/cache
+  postgres:
+    image: postgres:17
+    networks: [data]
+networks:
+  data: {}
+volumes:
+  cache: {}
+"#,
+    );
+    write(
+        &root,
+        "deploy/k8s.yaml",
+        r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: acme/api:2
+        envFrom:
+        - configMapRef:
+            name: app_config_v2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector:
+    app: api
+"#,
+    );
+    write(
+        &root,
+        "infra/network.tf",
+        r#"resource "aws_instance" "frontend" {
+  subnet_id = aws_subnet.main.id
+}
+resource "aws_subnet" "main" {
+  cidr_block = "10.0.1.0/24"
+}
+resource "aws_security_group" "web" {
+  name = "web"
+}
+"#,
+    );
+    fs::remove_file(root.join("infra/main.tf")).unwrap();
+
+    indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    let store = Store::open(&cfg.db_path).unwrap();
+    let project = store.projects().unwrap()[0].name.clone();
+    let incremental = graph_signature(&store, &project);
+
+    // Removed infrastructure must not survive the delta.
+    let qns: Vec<String> = store
+        .all_nodes(&project)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.qualified_name)
+        .collect();
+    assert!(!qns.iter().any(|q| q.contains("compose/Service/-/db")));
+    assert!(!qns.iter().any(|q| q.contains("compose/Network/-/backend")));
+    assert!(!qns.iter().any(|q| q.contains("Ingress")));
+    assert!(!qns
+        .iter()
+        .any(|q| q == "terraform.resource.aws_instance.web"));
+    assert!(qns.iter().any(|q| q.contains("compose/Service/-/postgres")));
+    assert!(qns
+        .iter()
+        .any(|q| q == "terraform.resource.aws_instance.frontend"));
+    assert!(qns
+        .iter()
+        .any(|q| q == "terraform.resource.aws_security_group.web"));
+    assert!(!qns.iter().any(|q| q.contains("db_password")));
+
+    drop(store);
+    let clean_dir = tempfile::tempdir().unwrap();
+    let clean_cfg = config(clean_dir.path());
+    let clean_report = Indexer::new(clean_cfg.clone())
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    let clean_store = Store::open(&clean_cfg.db_path).unwrap();
+    let clean = graph_signature(&clean_store, &clean_report.project);
+    assert_eq!(
+        incremental, clean,
+        "incremental infra graph differs from clean rebuild"
+    );
+}
+
+#[test]
+fn malformed_infrastructure_is_isolated_and_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    write_infra_fixture(&root);
+    write(
+        &root,
+        "deploy/docker-compose.broken.yml",
+        "services: [unclosed\n  - nope\n",
+    );
+    let cfg = config(dir.path());
+    let indexer = Indexer::new(cfg.clone());
+    let report = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    let store = Store::open(&cfg.db_path).unwrap();
+    assert!(store
+        .nodes_by_file(&report.project, "deploy/docker-compose.yml")
+        .unwrap()
+        .iter()
+        .any(|n| n.name == "api"));
+    // A malformed optional manifest cannot remove valid evidence.
+    assert!(store
+        .nodes_by_file(&report.project, "deploy/k8s.yaml")
+        .unwrap()
+        .iter()
+        .any(|n| n.name == "web"));
+    drop(store);
+
+    // Repair the file: the new service appears without a full rebuild.
+    write(
+        &root,
+        "deploy/docker-compose.broken.yml",
+        "services:\n  worker:\n    image: acme/worker:1\n",
+    );
+    let report = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    let store = Store::open(&cfg.db_path).unwrap();
+    assert!(store
+        .nodes_by_file(&report.project, "deploy/docker-compose.broken.yml")
+        .unwrap()
+        .iter()
+        .any(|n| n.name == "worker"));
+    drop(store);
+
+    // Delete it: no phantom file or nodes remain.
+    fs::remove_file(root.join("deploy/docker-compose.broken.yml")).unwrap();
+    let report = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    let store = Store::open(&cfg.db_path).unwrap();
+    assert!(store
+        .nodes_by_file(&report.project, "deploy/docker-compose.broken.yml")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn agent_state_directories_are_never_indexed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    write(&root, "src/lib.rs", "pub fn handler() -> usize { 1 }\n");
+    write(
+        &root,
+        ".ohgo/progress.json",
+        r#"{"variables":{"a":1,"b":2},"transcript":"fn handler() {}"}"#,
+    );
+    write(
+        &root,
+        ".izen/runtime/snapshot.json",
+        r#"{"session":"x","variables":{"c":3}}"#,
+    );
+    write(&root, ".gryignore", "*.tmp\n");
+    write(&root, "scratch.tmp", "pub fn hidden() {}\n");
+    let cfg = config(dir.path());
+    let report = Indexer::new(cfg.clone())
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    let store = Store::open(&cfg.db_path).unwrap();
+    for path in [
+        ".ohgo/progress.json",
+        ".izen/runtime/snapshot.json",
+        "scratch.tmp",
+    ] {
+        assert!(
+            store
+                .nodes_by_file(&report.project, path)
+                .unwrap()
+                .is_empty(),
+            "{path} must not be indexed"
+        );
+    }
+    assert!(store
+        .nodes_by_file(&report.project, "src/lib.rs")
+        .unwrap()
+        .iter()
+        .any(|n| n.name == "handler"));
+}
+
+#[test]
+fn go_route_registration_links_its_handler_across_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("gomini");
+    fs::create_dir_all(&root).unwrap();
+    write(&root, "go.mod", "module example.test/gomini\n\ngo 1.22\n");
+    write(
+        &root,
+        "api/controller/task_controller.go",
+        "package controller\n\ntype TaskController struct{}\n\nfunc (tc *TaskController) Create() {}\n",
+    );
+    write(
+        &root,
+        "api/route/task_route.go",
+        "package route\n\nimport ctrl \"example.test/gomini/api/controller\"\n\ntype Group struct{}\n\nfunc (g *Group) POST(path string, handler func()) {}\n\nfunc NewTaskRouter(group *Group) {\n\ttc := &ctrl.TaskController{}\n\tgroup.POST(\"/task\", tc.Create)\n}\n",
+    );
+    let cfg = config(dir.path());
+    let indexer = Indexer::new(cfg.clone());
+    let report = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    let store = Store::open(&cfg.db_path).unwrap();
+    let trace = store
+        .trace(&gry_store::traverse::TraceParams {
+            project: report.project.clone(),
+            start_qn: format!(
+                "{}.api.controller.task_controller.TaskController.Create",
+                report.project
+            ),
+            direction: gry_store::traverse::Direction::Outbound,
+            depth: 1,
+            edge_types: vec!["HANDLES".to_string()],
+            include_tests: false,
+            limit: 10,
+            parameter_name: None,
+        })
+        .unwrap()
+        .expect("handler node was not indexed");
+    assert!(
+        trace
+            .hops
+            .iter()
+            .any(|hop| hop.via_edge == "HANDLES"
+                && hop.node.qualified_name == "__route__POST__/task"),
+        "POST /task was not linked to TaskController.Create: {:?}",
+        trace.hops
+    );
+}

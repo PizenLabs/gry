@@ -168,6 +168,12 @@ pub struct RouteDef {
     pub path: String,
     #[serde(default)]
     pub handler: Option<String>,
+    /// Receiver type of the handler expression when the extractor could infer
+    /// it (for example `tc.Create` where `tc` is a `*TaskController`). This lets
+    /// the indexer link the route to the handler across files instead of
+    /// falling back to the router function.
+    #[serde(default)]
+    pub handler_type: Option<String>,
     pub line: i32,
     #[serde(default)]
     pub framework: String,

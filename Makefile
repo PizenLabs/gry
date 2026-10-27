@@ -16,6 +16,7 @@ PKG_VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 
 
 .PHONY: help all build build-debug release \
 	check fmt fmt-check clippy lint test test-unit test-integration test-doc \
+	test-install test-opencode \
 	doc doc-open run install uninstall bench differential smoke verify \
 	package publish-dry-run publish version clean clean-target dist dist-clean
 
@@ -75,6 +76,14 @@ test-integration:
 ## test-doc: run documentation tests
 test-doc:
 	$(CARGO) test --workspace --doc --locked $(CARGO_FLAGS)
+
+## test-install: run the deterministic installer fixture suite
+test-install:
+	bash scripts/install_test.sh
+
+## test-opencode: run the OpenCode plugin contract suite under Node
+test-opencode:
+	node --test crates/gry-cli/tests/opencode_plugin_test.mjs
 
 ## doc: build the API documentation (no dependency docs)
 doc:

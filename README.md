@@ -98,13 +98,23 @@ curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh 
 # Install the binary without touching MCP configuration.
 curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash -s -- --no-mcp
 
-# Remove gry, its MCP entries, and the PATH block.
+# MCP + native lifecycle hooks (currently OpenCode V2).
+curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash -s -- --client opencode --hooks
+
+# Show what gry owns and whether a managed file was edited.
+curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash -s -- --status
+
+# Remove gry, its MCP entries, managed hook adapter, and the PATH block.
 curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash -s -- --uninstall
 ```
 
 `--client auto` is the default; `gry install --list-clients` prints every id. The
 installer also installs the gry agent skill and adds the install directory to your
-shell PATH when needed (`--no-skill` and `--no-modify-path` opt out).
+shell PATH when needed (`--no-skill` and `--no-modify-path` opt out). Native hooks
+are opt-in with `--hooks` and are not activated by auto-detection.
+
+See [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) for the runtime matrix, event
+coverage, ownership rules, and troubleshooting.
 
 ### Requirements
 

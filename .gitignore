@@ -53,3 +53,6 @@ lcov.info
 ._*
 Thumbs.db
 eval/__pycache__/
+
+# ohgo runtime state
+.ohgo/

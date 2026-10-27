@@ -20,6 +20,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: for f in scripts/*.sh; do bash -n "$f"; done
       - run: cargo test --workspace
+      - run: bash scripts/install_test.sh
       - run: cargo package --workspace --locked --no-verify
       - run: cargo build --release --bin gry
       - run: ./target/release/gry --version

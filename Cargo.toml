@@ -13,7 +13,7 @@ members = [
 [workspace.package]
 edition = "2021"
 rust-version = "1.85"
-version = "1.0.2"
+version = "1.0.3"
 license = "Apache-2.0"
 authors = ["PizenLabs"]
 repository = "https://github.com/PizenLabs/gry"
@@ -23,12 +23,12 @@ keywords = ["code-intelligence", "mcp", "tree-sitter", "code-graph", "static-ana
 categories = ["development-tools", "parsing", "command-line-utilities"]
 
 [workspace.dependencies]
-gry-core = { version = "1.0.2", path = "crates/gry-core" }
-gry-store = { version = "1.0.2", path = "crates/gry-store" }
-gry-parse = { version = "1.0.2", path = "crates/gry-parse" }
-gry-index = { version = "1.0.2", path = "crates/gry-index" }
-gry-query = { version = "1.0.2", path = "crates/gry-query" }
-gry-mcp = { version = "1.0.2", path = "crates/gry-mcp" }
+gry-core = { version = "1.0.3", path = "crates/gry-core" }
+gry-store = { version = "1.0.3", path = "crates/gry-store" }
+gry-parse = { version = "1.0.3", path = "crates/gry-parse" }
+gry-index = { version = "1.0.3", path = "crates/gry-index" }
+gry-query = { version = "1.0.3", path = "crates/gry-query" }
+gry-mcp = { version = "1.0.3", path = "crates/gry-mcp" }
 
 anyhow = "1.0"
 thiserror = "2.0"

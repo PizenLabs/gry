@@ -134,6 +134,18 @@ impl Store {
             filtered.push((node, in_deg, out_deg));
         }
 
+        // Filter-only searches have no relevance score. Keep production
+        // callables ahead of generated mocks and synthetic containers so an
+        // exact-name lookup does not return the mock first.
+        filtered.sort_by(|(a, _, _), (b, _, _)| {
+            crate::node_support_rank(a)
+                .cmp(&crate::node_support_rank(b))
+                .then_with(|| {
+                    crate::node_label_rank(&a.label).cmp(&crate::node_label_rank(&b.label))
+                })
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.id.cmp(&b.id))
+        });
         let total = filtered.len() as i64;
         let start = params.offset.min(filtered.len());
         let end = (start + params.limit.max(1)).min(filtered.len());
@@ -272,7 +284,9 @@ impl Store {
             stmt.query_row(refs.as_slice(), |row| row.get(0))?
         };
         sql.push_str(&format!(
-            " ORDER BY bm25(nodes_fts,10.0,5.0,1.0,1.0,2.0), n.id LIMIT {} OFFSET {}",
+            " ORDER BY bm25(nodes_fts,10.0,5.0,1.0,1.0,2.0), {}, {}, length(n.qualified_name), n.id LIMIT {} OFFSET {}",
+            support_order("n"),
+            label_order("n"),
             limit.max(1),
             offset
         ));
@@ -336,6 +350,29 @@ fn is_entry_point(node: &Node, in_deg: i64, out_deg: i64) -> bool {
     false
 }
 
+fn support_order(alias: &str) -> String {
+    let path = format!("lower({alias}.file_path)");
+    format!(
+        "CASE WHEN {path} LIKE '%/mocks/%' OR {path} LIKE 'mocks/%' \
+         OR {path} LIKE '%/mock/%' OR {path} LIKE 'mock/%' \
+         OR {path} LIKE '%_test.go' OR {path} LIKE '%_test.py' \
+         OR {path} LIKE '%.test.ts' OR {path} LIKE '%.test.js' \
+         OR {path} LIKE '%.spec.ts' OR {path} LIKE '%.spec.js' \
+         OR json_extract({alias}.properties,'$.is_generated')=1 THEN 1 ELSE 0 END"
+    )
+}
+
+fn label_order(alias: &str) -> String {
+    format!(
+        "CASE lower({alias}.label) \
+         WHEN 'function' THEN 0 WHEN 'method' THEN 0 WHEN 'route' THEN 0 \
+         WHEN 'class' THEN 0 WHEN 'struct' THEN 0 WHEN 'interface' THEN 0 \
+         WHEN 'trait' THEN 0 WHEN 'enum' THEN 0 WHEN 'type' THEN 0 \
+         WHEN 'field' THEN 1 WHEN 'variable' THEN 1 WHEN 'constant' THEN 1 \
+         ELSE 2 END"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,5 +426,51 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(out.hits.iter().any(|h| h.node.name == "parseRequest"));
+    }
+
+    #[test]
+    fn exact_name_prefers_production_over_mock() {
+        use crate::{NewNode, ProjectWrite};
+        let mut store = Store::open_in_memory().unwrap();
+        let nodes = vec![
+            NewNode::new(
+                "Function",
+                "CreateAccessToken",
+                "p.domain.mocks.LoginUsecase.LoginUsecase.CreateAccessToken",
+                "domain/mocks/LoginUsecase.go",
+                1,
+                10,
+            ),
+            NewNode::new(
+                "Function",
+                "CreateAccessToken",
+                "p.internal.tokenutil.CreateAccessToken",
+                "internal/tokenutil/tokenutil.go",
+                1,
+                10,
+            ),
+        ];
+        let mut write = ProjectWrite::new("p", "/tmp/p", "full", "gen-1");
+        write.nodes = &nodes;
+        store.publish(&write).unwrap();
+        let out = store
+            .bm25("p", "CreateAccessToken", None, None, None, None, 10, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            out.hits[0].node.qualified_name,
+            "p.internal.tokenutil.CreateAccessToken"
+        );
+        let params = SearchParams {
+            project: "p".to_string(),
+            name_pattern: Some(".*CreateAccessToken.*".to_string()),
+            limit: 10,
+            ..Default::default()
+        };
+        let out = store.search(&params).unwrap();
+        assert_eq!(
+            out.hits[0].node.qualified_name,
+            "p.internal.tokenutil.CreateAccessToken"
+        );
     }
 }

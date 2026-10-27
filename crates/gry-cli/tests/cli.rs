@@ -259,7 +259,9 @@ fn install_auto_detects_configured_harnesses() {
         &fs::read(home.path().join(".config/opencode/opencode.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(opencode["mcp"]["gry"]["command"][1], "serve");
+    assert_eq!(opencode["mcp"]["servers"]["gry"]["command"][1], "serve");
+    assert_eq!(opencode["mcp"]["servers"]["gry"]["type"], "local");
+    assert!(opencode["mcp"]["servers"]["gry"].get("enabled").is_none());
     let omp: Value =
         serde_json::from_slice(&fs::read(home.path().join(".omp/agent/mcp.json")).unwrap())
             .unwrap();
@@ -282,7 +284,7 @@ fn install_auto_detects_configured_harnesses() {
         &fs::read(home.path().join(".config/opencode/opencode.json")).unwrap(),
     )
     .unwrap();
-    assert!(opencode["mcp"].get("gry").is_none());
+    assert!(opencode["mcp"]["servers"].get("gry").is_none());
     let omp: Value =
         serde_json::from_slice(&fs::read(home.path().join(".omp/agent/mcp.json")).unwrap())
             .unwrap();
@@ -844,4 +846,227 @@ fn context_unknown_project_fails_with_a_typed_error() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("project not found or not indexed"));
+}
+
+#[test]
+fn opencode_v2_config_migrates_v1_and_preserves_user_settings() {
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".config/opencode/opencode.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        r#"{"theme":"dark","mcp":{"gry":{"type":"local","command":["/old/gry","serve"]},"servers":{"other":{"type":"local","command":["other"]}}}}"#,
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        let output = Command::new(bin())
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
+            .args(["install", "--client", "opencode"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert_eq!(value["theme"], "dark");
+    assert!(value["mcp"].get("gry").is_none());
+    assert_eq!(value["mcp"]["servers"]["gry"]["type"], "local");
+    assert_eq!(value["mcp"]["servers"]["gry"]["command"][1], "serve");
+    assert_eq!(
+        value["mcp"]["servers"]["other"]["command"][0], "other",
+        "unrelated MCP servers must survive"
+    );
+
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .args(["uninstall", "--client", "opencode"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert_eq!(value["theme"], "dark");
+    assert_eq!(value["mcp"]["servers"]["other"]["command"][0], "other");
+    assert!(value["mcp"]["servers"].get("gry").is_none());
+}
+
+#[test]
+fn opencode_uninstall_refuses_a_foreign_entry() {
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".config/opencode/opencode.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let original = r#"{"mcp":{"servers":{"gry":{"type":"local","command":["user-server"]}}}}"#;
+    fs::write(&config, original).unwrap();
+
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .args(["uninstall", "--client", "opencode"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+}
+
+#[test]
+fn opencode_hooks_install_status_and_conflict() {
+    let home = tempfile::tempdir().unwrap();
+    let config_root = home.path().join(".config");
+    let plugin = config_root.join("opencode/plugins/gry.js");
+    fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+    fs::write(&plugin, "// user-owned plugin\n").unwrap();
+
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", &config_root)
+        .args(["install", "--client", "opencode", "--hooks"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "must not overwrite a foreign plugin"
+    );
+    assert_eq!(
+        fs::read_to_string(&plugin).unwrap(),
+        "// user-owned plugin\n"
+    );
+
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", &config_root)
+        .args(["install", "--client", "opencode", "--hooks", "--force"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let installed = fs::read_to_string(&plugin).unwrap();
+    assert!(installed.contains("before_plan"));
+    assert!(installed.contains("before_finish"));
+    assert!(installed.contains("ADAPTER_VERSION = 1"));
+
+    let status = Command::new(bin())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", &config_root)
+        .args(["--json", "integrations", "--verify"])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let value: Value = serde_json::from_slice(&status.stdout).unwrap();
+    let row = value["integrations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "opencode")
+        .expect("opencode integration recorded");
+    assert_eq!(row["mcp"]["status"], "installed");
+    assert_eq!(row["hooks"]["status"], "installed");
+
+    fs::write(&plugin, "// modified by the user\n").unwrap();
+    let status = Command::new(bin())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", &config_root)
+        .args(["--json", "integrations", "--verify"])
+        .output()
+        .unwrap();
+    let value: Value = serde_json::from_slice(&status.stdout).unwrap();
+    let row = value["integrations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["client"] == "opencode")
+        .unwrap();
+    assert_eq!(row["hooks"]["status"], "modified");
+
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", &config_root)
+        .args(["uninstall", "--client", "opencode"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "must not delete a modified plugin"
+    );
+    assert!(plugin.exists());
+}
+
+#[test]
+fn hook_project_auto_resolves_the_nearest_indexed_root() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    run(
+        &cache,
+        &["index", root.to_str().unwrap(), "--name", "auto-root"],
+    );
+    let nested = root.join("src");
+    let output = Command::new(bin())
+        .arg("--cache-dir")
+        .arg(&cache)
+        .current_dir(&nested)
+        .args([
+            "hook",
+            "before_plan",
+            "--project",
+            "auto",
+            "--json",
+            "--no-cache",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["hook"]["stage"], "before_plan");
+    assert!(value["hook"]["status"].is_string());
+
+    let outside = tempfile::tempdir().unwrap();
+    let output = Command::new(bin())
+        .arg("--cache-dir")
+        .arg(&cache)
+        .current_dir(outside.path())
+        .args(["hook", "before_plan", "--project", "auto", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no indexed project contains"));
+}
+
+#[test]
+fn install_refuses_malformed_structural_configuration() {
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".config/opencode/opencode.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let original = r#"{"mcp":[]}"#;
+    fs::write(&config, original).unwrap();
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .args(["install", "--client", "opencode"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(fs::read_to_string(&config).unwrap(), original);
+
+    let codex = home.path().join(".codex/config.toml");
+    fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    fs::write(&codex, "[mcp_servers.gry\ncommand = \"x\"\n").unwrap();
+    let output = Command::new(bin())
+        .env("HOME", home.path())
+        .args(["install", "--client", "codex"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not valid TOML"));
 }

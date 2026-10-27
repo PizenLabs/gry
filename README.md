@@ -98,13 +98,23 @@ curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh 
 # Install the binary without touching MCP configuration.
 curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash -s -- --no-mcp
 
-# Remove gry, its MCP entries, and the PATH block.
+# MCP + native lifecycle hooks (currently OpenCode V2).
+curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash -s -- --client opencode --hooks
+
+# Show what gry owns and whether a managed file was edited.
+curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash -s -- --status
+
+# Remove gry, its MCP entries, managed hook adapter, and the PATH block.
 curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash -s -- --uninstall
 ```
 
 `--client auto` is the default; `gry install --list-clients` prints every id. The
 installer also installs the gry agent skill and adds the install directory to your
-shell PATH when needed (`--no-skill` and `--no-modify-path` opt out).
+shell PATH when needed (`--no-skill` and `--no-modify-path` opt out). Native hooks
+are opt-in with `--hooks` and are not activated by auto-detection.
+
+See [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) for the runtime matrix, event
+coverage, ownership rules, and troubleshooting.
 
 ### Requirements
 
@@ -244,9 +254,17 @@ configured with `--config`.
 
 `get_task_context` returns a small, evidence-backed payload instead of a repository dump. It
 resolves targets by qualified name, symbol name, file or bounded BM25 search, then adds callers,
-callees, imports, service relationships, coverage and optional change evidence. Every row keeps its
-source location, role, distance and provenance (`verified`, `declared`, `inferred` or `observed`).
-`max_output_tokens` is a hard limit with whole-row truncation and explicit omitted counts.
+callees, imports, service relationships, coverage, optional test-gap evidence and optional change
+evidence. Every row keeps its source location, role, distance and provenance (`verified`,
+`declared`, `inferred` or `observed`). `project` is optional when the workspace root is indexed.
+`include_source` adds exact bounded source for the most relevant callables so the caller does not
+need a second snippet/read round trip. `max_output_tokens` is a hard limit with whole-row
+truncation and explicit omitted counts.
+
+Short names resolve deterministically: production code is preferred over generated mocks and
+tests, and an ambiguous short name returns candidates instead of silently tracing the first match.
+`Type.Method`, a unique suffix and a full qualified name are accepted by `trace_path` and
+`get_code_snippet`.
 
 Three profiles share one implementation:
 

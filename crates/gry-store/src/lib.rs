@@ -1130,34 +1130,79 @@ impl Store {
             .optional()?)
     }
 
-    /// Resolve a full QN, then a unique suffix, then an exact short name.
+    /// Resolve a full QN, then a suffix, then an exact short name.
+    ///
+    /// Several symbols legitimately share a short name (a production method and
+    /// its generated mock, or the same method on two receivers). Resolution is
+    /// deterministic and prefers production code; when two equally authoritative
+    /// symbols remain, the name is ambiguous and `None` is returned instead of
+    /// silently picking one. Callers that can show candidates (for example
+    /// `trace_path`) should do so.
     pub fn resolve_node(&self, project: &str, name_or_qn: &str) -> StoreResult<Option<Node>> {
-        if let Some(node) = self.node_by_qn(project, name_or_qn)? {
+        let input = name_or_qn.trim();
+        if input.is_empty() {
+            return Ok(None);
+        }
+        if let Some(node) = self.node_by_qn(project, input)? {
             return Ok(Some(node));
         }
+        // A case-sensitive suffix match distinguishes `taskRepository.Fetch`
+        // from `TaskRepository.Fetch` without depending on SQLite's
+        // case-insensitive LIKE.
         let mut stmt = self.conn.prepare(
             "SELECT id,project,label,name,qualified_name,file_path,start_line,end_line,properties
-             FROM nodes WHERE project=?1 AND qualified_name LIKE ?2
-             ORDER BY length(qualified_name), qualified_name LIMIT 8",
+             FROM nodes WHERE project=?1 AND length(qualified_name)>=length(?2)
+               AND substr(qualified_name, -length(?2))=?2
+               AND (qualified_name=?2 OR substr(qualified_name, -length(?2)-1, 1)='.')
+             ORDER BY length(qualified_name), qualified_name LIMIT 16",
         )?;
-        let suffix = format!("%.{name_or_qn}");
-        let rows = stmt.query_map(params![project, suffix], row_to_node)?;
+        let rows = stmt.query_map(params![project, input], row_to_node)?;
         let found: Vec<Node> = rows.collect::<Result<Vec<_>, _>>()?;
-        if found.len() == 1 {
-            return Ok(found.into_iter().next());
+        if let Some(node) = choose_ranked_node(found) {
+            // A case-sensitive match to a mock is still not the authoritative
+            // production symbol unless nothing better exists. Keep looking so
+            // `TaskRepository.Fetch` does not resolve to the generated mock
+            // merely because the mock's receiver is capitalized.
+            if node_support_rank(&node) == 0 {
+                return Ok(Some(node));
+            }
+        }
+        // Fall back to a case-insensitive suffix. This handles the common
+        // `Type.Method` form when the receiver is written with different case
+        // than the parser's FQN, and still prefers production over mocks/tests.
+        let mut stmt = self.conn.prepare(
+            "SELECT id,project,label,name,qualified_name,file_path,start_line,end_line,properties
+             FROM nodes WHERE project=?1 AND lower(qualified_name) LIKE '%.' || lower(?2)
+             ORDER BY length(qualified_name), qualified_name LIMIT 16",
+        )?;
+        let rows = stmt.query_map(params![project, input], row_to_node)?;
+        let found: Vec<Node> = rows.collect::<Result<Vec<_>, _>>()?;
+        if let Some(node) = choose_ranked_node(found) {
+            return Ok(Some(node));
         }
         let mut stmt = self.conn.prepare(
             "SELECT id,project,label,name,qualified_name,file_path,start_line,end_line,properties
              FROM nodes WHERE project=?1 AND name=?2
              ORDER BY CASE label WHEN 'Function' THEN 0 WHEN 'Method' THEN 1 ELSE 2 END,
-                      qualified_name LIMIT 8",
+                      qualified_name LIMIT 16",
         )?;
-        let rows = stmt.query_map(params![project, name_or_qn], row_to_node)?;
+        let rows = stmt.query_map(params![project, input], row_to_node)?;
         let found: Vec<Node> = rows.collect::<Result<Vec<_>, _>>()?;
-        if found.len() == 1 {
-            return Ok(found.into_iter().next());
-        }
-        Ok(None)
+        Ok(choose_ranked_node(found))
+    }
+
+    /// Exact-short-name candidates, ordered by the same authority ranking used
+    /// by `resolve_node`. Used for actionable ambiguity messages.
+    pub fn nodes_by_name(&self, project: &str, name: &str) -> StoreResult<Vec<Node>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,project,label,name,qualified_name,file_path,start_line,end_line,properties
+             FROM nodes WHERE project=?1 AND name=?2
+             ORDER BY qualified_name LIMIT 32",
+        )?;
+        let rows = stmt.query_map(params![project, name], row_to_node)?;
+        let mut nodes = rows.collect::<Result<Vec<_>, _>>()?;
+        nodes.sort_by(node_authority_cmp);
+        Ok(nodes)
     }
 
     pub fn nodes_by_file(&self, project: &str, file_path: &str) -> StoreResult<Vec<Node>> {
@@ -2003,6 +2048,74 @@ pub fn edge_identity(edge: &Edge, nodes: &HashMap<i64, &Node>) -> String {
     )
 }
 
+/// Authority of a node for short-name resolution. Production callables win
+/// over tests, mocks and generated files; a callable wins over a field or a
+/// synthetic container.
+fn node_authority(node: &Node) -> (u8, u8) {
+    (node_support_rank(node), node_label_rank(&node.label))
+}
+
+fn node_support_rank(node: &Node) -> u8 {
+    if node.property_bool("is_generated").unwrap_or(false)
+        || node.property_bool("generated").unwrap_or(false)
+    {
+        return 2;
+    }
+    let path = node.file_path.replace('\\', "/").to_ascii_lowercase();
+    let file = path.rsplit('/').next().unwrap_or("");
+    let in_mock_dir = path.contains("/mocks/")
+        || path.starts_with("mocks/")
+        || path.contains("/mock/")
+        || path.starts_with("mock/");
+    let mock_file = file.starts_with("mock_")
+        || file.ends_with("_mock.go")
+        || file.ends_with("_mock.rs")
+        || file.ends_with(".mock.ts")
+        || file.ends_with(".mock.js")
+        || file.contains(".mock.");
+    if in_mock_dir || mock_file {
+        return 2;
+    }
+    if traverse::is_test_node(node) {
+        return 1;
+    }
+    0
+}
+
+fn node_label_rank(label: &str) -> u8 {
+    match label {
+        labels::FUNCTION
+        | labels::METHOD
+        | labels::ROUTE
+        | labels::CLASS
+        | labels::STRUCT
+        | labels::INTERFACE
+        | labels::TRAIT
+        | labels::ENUM
+        | labels::TYPE => 0,
+        labels::FIELD | labels::VARIABLE | labels::CONSTANT => 1,
+        _ => 2,
+    }
+}
+
+fn node_authority_cmp(a: &Node, b: &Node) -> std::cmp::Ordering {
+    node_authority(a)
+        .cmp(&node_authority(b))
+        .then_with(|| a.qualified_name.len().cmp(&b.qualified_name.len()))
+        .then_with(|| a.qualified_name.cmp(&b.qualified_name))
+}
+
+fn choose_ranked_node(mut nodes: Vec<Node>) -> Option<Node> {
+    if nodes.is_empty() {
+        return None;
+    }
+    nodes.sort_by(node_authority_cmp);
+    if nodes.len() == 1 || node_authority(&nodes[0]) != node_authority(&nodes[1]) {
+        return Some(nodes.remove(0));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2097,5 +2210,68 @@ mod tests {
             .node_by_qn("p", "__package__leftover")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn short_name_resolution_prefers_production_and_reports_ambiguity() {
+        let mut store = Store::open_in_memory().unwrap();
+        let nodes = vec![
+            NewNode::new(
+                "Function",
+                "FetchByUserID",
+                "p.repository.task_repository.taskRepository.FetchByUserID",
+                "repository/task_repository.go",
+                10,
+                20,
+            ),
+            NewNode::new(
+                "Function",
+                "FetchByUserID",
+                "p.domain.mocks.TaskRepository.TaskRepository.FetchByUserID",
+                "domain/mocks/TaskRepository.go",
+                10,
+                20,
+            ),
+            NewNode::new(
+                "Function",
+                "FetchByUserID",
+                "p.usecase.task_usecase.taskUsecase.FetchByUserID",
+                "usecase/task_usecase.go",
+                10,
+                20,
+            ),
+        ];
+        let mut write = ProjectWrite::new("p", "/tmp/p", "full", "gen-1");
+        write.nodes = &nodes;
+        store.publish(&write).unwrap();
+
+        // Case-sensitive suffix selects the production repository method.
+        assert_eq!(
+            store
+                .resolve_node("p", "taskRepository.FetchByUserID")
+                .unwrap()
+                .unwrap()
+                .qualified_name,
+            "p.repository.task_repository.taskRepository.FetchByUserID"
+        );
+        // A differently-cased receiver still resolves to production code, not
+        // the generated mock.
+        assert_eq!(
+            store
+                .resolve_node("p", "TaskRepository.FetchByUserID")
+                .unwrap()
+                .unwrap()
+                .qualified_name,
+            "p.repository.task_repository.taskRepository.FetchByUserID"
+        );
+        // Two production methods share the short name: refuse to guess.
+        assert!(store.resolve_node("p", "FetchByUserID").unwrap().is_none());
+        // A partial name is not a suffix match.
+        assert!(store.resolve_node("p", "ain").unwrap().is_none());
+        let candidates = store.nodes_by_name("p", "FetchByUserID").unwrap();
+        assert_eq!(candidates.len(), 3);
+        assert!(!candidates[0].qualified_name.contains("domain.mocks"));
+        assert!(!candidates[1].qualified_name.contains("domain.mocks"));
+        assert!(candidates[2].qualified_name.contains("domain.mocks"));
     }
 }

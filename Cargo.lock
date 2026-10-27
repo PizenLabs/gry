@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "gry"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "chrono",
  "clap",
@@ -583,18 +583,21 @@ dependencies = [
  "gry-mcp",
  "gry-query",
  "gry-store",
+ "hex",
  "libc",
  "parking_lot",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "gry-core"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "chrono",
  "hex",
@@ -613,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "gry-index"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "chrono",
  "crossbeam-channel",
@@ -640,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "gry-mcp"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "chrono",
  "gry-core",
@@ -657,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "gry-parse"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "cortexkit-tree-sitter-scss",
  "gry-core",
@@ -743,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "gry-query"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "base64",
  "chrono",
@@ -764,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "gry-store"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "chrono",
  "globset",

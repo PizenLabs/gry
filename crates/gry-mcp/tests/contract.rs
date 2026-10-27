@@ -286,3 +286,39 @@ fn errors_and_prompts() {
         .unwrap()
         .contains("detect_changes"));
 }
+
+#[test]
+fn read_only_tools_accept_an_omitted_project_and_context_exposes_source() {
+    let tools = gry_mcp::tools::tools();
+    let optional_project = [
+        "search_graph",
+        "query_graph",
+        "trace_path",
+        "get_code_snippet",
+        "get_file_outline",
+        "get_graph_schema",
+        "get_architecture",
+        "search_code",
+        "index_status",
+        "check_index_coverage",
+        "get_task_context",
+        "detect_changes",
+    ];
+    for name in optional_project {
+        let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+        let required = tool.schema["required"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !required.iter().any(|value| value == "project"),
+            "{name} should not require project"
+        );
+    }
+    let context = tools
+        .iter()
+        .find(|tool| tool.name == "get_task_context")
+        .unwrap();
+    assert!(context.schema["properties"]["include_source"].is_object());
+    assert!(context.always_load);
+}

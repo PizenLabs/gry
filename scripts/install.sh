@@ -15,7 +15,8 @@
 #   4. installs `gry` into ~/.local/bin (or /usr/local/bin as root);
 #   5. detects installed agent harnesses and configures their MCP entry with
 #      `gry install --client auto`;
-#   6. optionally installs the gry agent skill.
+#   6. optionally installs the gry agent skill and, with --hooks, the OpenCode
+#      V2 lifecycle plugin.
 #
 # Environment:
 #   GRY_VERSION          Release tag to install (default: latest).
@@ -38,6 +39,8 @@ PREFIX="${GRY_INSTALL_DIR:-}"
 CLIENT="${GRY_CLIENT:-auto}"
 MODIFY_PATH="${GRY_MODIFY_PATH:-}"
 SKILL=1
+HOOKS=0
+STATUS=0
 INDEX_PATH=""
 FROM_SOURCE=0
 FORCE=0
@@ -98,6 +101,9 @@ Options:
   --index [path]           Index a repository after setup (default: .)
   --skill                  Install the gry agent skill (default)
   --no-skill               Do not install the agent skill
+  --hooks                  Install native lifecycle hooks where supported
+                           (currently the OpenCode V2 plugin). Opt-in.
+  --status                 Print the managed integration status and exit
   --no-mcp                 Skip MCP configuration
   --modify-path            Add the install directory to the shell PATH
   --no-modify-path         Do not edit shell startup files
@@ -177,6 +183,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-skill)
       SKILL=0
+      shift
+      ;;
+    --hooks)
+      HOOKS=1
+      shift
+      ;;
+    --status)
+      STATUS=1
       shift
       ;;
     --no-mcp)
@@ -434,13 +448,18 @@ try_prebuilt() {
     fi
     log "checksum verified"
   fi
+  # Reject absolute paths and parent traversal before extracting. An archive
+  # is untrusted input even when it came from the project's own release page.
+  if tar -tzf "$TMP/$asset" | grep -Eq '(^/|(^|/)\.\.($|/))'; then
+    die "refusing to extract $asset: archive contains an unsafe path"
+  fi
   mkdir -p "$TMP/extract"
   if ! tar -xzf "$TMP/$asset" -C "$TMP/extract"; then
     warn "could not unpack $asset"
     return 1
   fi
-  if [ ! -f "$TMP/extract/gry" ]; then
-    warn "$asset did not contain a gry binary"
+  if [ -L "$TMP/extract/gry" ] || [ ! -f "$TMP/extract/gry" ]; then
+    warn "$asset did not contain a regular gry binary"
     return 1
   fi
   install_binary "$TMP/extract/gry"
@@ -590,23 +609,43 @@ run_uninstall_cmd() {
 
 configure_one_client() {
   client="$1"
-  if [ "$SKILL" -eq 1 ]; then
-    if [ "$DRY_RUN" -eq 1 ]; then
-      run_install_cmd --client "$client" --dry-run --skill
+  if [ "$DRY_RUN" -eq 1 ]; then
+    if [ "$SKILL" -eq 1 ]; then
+      if [ "$HOOKS" -eq 1 ]; then
+        run_install_cmd --client "$client" --dry-run --skill --hooks
+      else
+        run_install_cmd --client "$client" --dry-run --skill
+      fi
     else
-      run_install_cmd --client "$client" --skill
+      if [ "$HOOKS" -eq 1 ]; then
+        run_install_cmd --client "$client" --dry-run --hooks
+      else
+        run_install_cmd --client "$client" --dry-run
+      fi
     fi
   else
-    if [ "$DRY_RUN" -eq 1 ]; then
-      run_install_cmd --client "$client" --dry-run
+    if [ "$SKILL" -eq 1 ]; then
+      if [ "$HOOKS" -eq 1 ]; then
+        run_install_cmd --client "$client" --skill --hooks
+      else
+        run_install_cmd --client "$client" --skill
+      fi
     else
-      run_install_cmd --client "$client"
+      if [ "$HOOKS" -eq 1 ]; then
+        run_install_cmd --client "$client" --hooks
+      else
+        run_install_cmd --client "$client"
+      fi
     fi
   fi
 }
 
 setup_mcp() {
   if [ "$CLIENT" = "none" ]; then
+    if [ "$HOOKS" -eq 1 ]; then
+      warn "--hooks requires a client; integration hooks were not installed"
+      SETUP_FAILED=1
+    fi
     log "skipping MCP configuration"
     return 0
   fi
@@ -702,6 +741,14 @@ uninstall() {
   fi
   say "gry uninstalled"
 }
+
+if [ "$STATUS" -eq 1 ]; then
+  if [ ! -x "$BIN" ]; then
+    die "gry is not installed at $BIN"
+  fi
+  "$BIN" integrations --verify
+  exit 0
+fi
 
 if [ "$UNINSTALL" -eq 1 ]; then
   uninstall

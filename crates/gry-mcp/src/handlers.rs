@@ -541,6 +541,7 @@ fn context_tool(
         timeout_ms: u(args, "timeout_ms", 3000).clamp(1, 30_000) as u64,
         task_id: None,
         stage: None,
+        include_source: b(args, "include_source"),
     };
     let value = get_task_context(&store, &req)?;
     Ok((value, format(args), max_tokens(args, 3200)))

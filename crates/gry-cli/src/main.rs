@@ -107,6 +107,12 @@ enum Command {
     Install(InstallCmd),
     /// Remove gry from an MCP client configuration.
     Uninstall(UninstallCmd),
+    /// Show the integrations gry owns and whether they still match.
+    Integrations {
+        /// Re-hash owned files and report local modifications.
+        #[arg(long)]
+        verify: bool,
+    },
     /// Print or install an agent skill.
     Skill(SkillCmd),
     /// Show how to update this installation.
@@ -303,6 +309,9 @@ struct ContextCmd {
     expected_generation: Option<String>,
     #[arg(long = "timeout-ms", default_value_t = 3000)]
     timeout_ms: u64,
+    /// Include exact source for the most relevant callables.
+    #[arg(long = "include-source")]
+    include_source: bool,
 }
 
 #[derive(Args)]
@@ -447,6 +456,12 @@ struct InstallCmd {
     /// Install the agent skill alongside the MCP entry.
     #[arg(long)]
     skill: bool,
+    /// Install native lifecycle hooks (currently: OpenCode V2 plugin).
+    #[arg(long)]
+    hooks: bool,
+    /// Replace a managed integration whose file was edited by the user.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Args)]
@@ -706,6 +721,7 @@ fn run(cli: &Cli, config: &Config) -> gry_core::GryResult<()> {
                 timeout_ms: cmd.timeout_ms,
                 task_id: None,
                 stage: None,
+                include_source: cmd.include_source,
             };
             print_compact(&gry_query::context::get_task_context(&store, &req)?);
             Ok(())
@@ -793,6 +809,7 @@ fn run(cli: &Cli, config: &Config) -> gry_core::GryResult<()> {
         Command::Config(cmd) => config_cmd(config, cmd),
         Command::Install(cmd) => install_cmd(config, cmd),
         Command::Uninstall(cmd) => uninstall_cmd(cmd),
+        Command::Integrations { verify } => integrations_cmd(*verify),
         Command::Skill(cmd) => skill_cmd(cmd),
         Command::Doctor => doctor_cmd(config),
         Command::Update => {
@@ -1480,8 +1497,44 @@ fn install_cmd(config: &Config, cmd: &InstallCmd) -> gry_core::GryResult<()> {
             .config
             .clone()
             .unwrap_or_else(|| client_config_path(client));
-        match configure_client(client, &exe, &path, cmd.dry_run) {
-            Ok(value) => configured.push(value),
+        match configure_client(client, &exe, &path, cmd.dry_run, cmd.force) {
+            Ok(mut value) => {
+                if cmd.hooks {
+                    match install_hooks(client, &exe, cmd.dry_run, cmd.force) {
+                        Ok(hooks) => {
+                            value["hooks"] = hooks;
+                        }
+                        Err(error) => {
+                            if multi {
+                                // Multi-client installs report the MCP half as
+                                // configured and the unsupported hook surface
+                                // explicitly instead of claiming it worked.
+                                value["hooks"] =
+                                    json!({"status": "unsupported", "error": error.to_string()});
+                            } else {
+                                failed.push(json!({"client": client, "error": error.to_string()}));
+                                configured.push(value);
+                                continue;
+                            }
+                        }
+                    }
+                }
+                if !cmd.dry_run {
+                    if let Err(error) = record_manifest(
+                        client,
+                        &path,
+                        value
+                            .get("hooks")
+                            .and_then(|h| h.get("path"))
+                            .and_then(Value::as_str)
+                            .map(Path::new),
+                    ) {
+                        failed.push(json!({"client": client, "error": format!("configured, manifest write failed: {error}")}));
+                        continue;
+                    }
+                }
+                configured.push(value);
+            }
             Err(error) => failed.push(json!({"client": client, "error": error.to_string()})),
         }
     }
@@ -1490,6 +1543,15 @@ fn install_cmd(config: &Config, cmd: &InstallCmd) -> gry_core::GryResult<()> {
     }
     if !multi {
         if let Some(error) = failed.first() {
+            if let Some(value) = configured.first() {
+                print_value(value);
+                return Err(gry_core::GryError::invalid(format!(
+                    "partial: {}",
+                    error["error"]
+                        .as_str()
+                        .unwrap_or("client configuration failed")
+                )));
+            }
             return Err(gry_core::GryError::invalid(
                 error["error"]
                     .as_str()
@@ -1529,9 +1591,18 @@ fn configure_client(
     exe: &str,
     path: &Path,
     dry_run: bool,
+    force: bool,
 ) -> gry_core::GryResult<Value> {
     if client == "codex" {
         let existing = std::fs::read_to_string(path).unwrap_or_default();
+        if !existing.trim().is_empty() {
+            existing.parse::<toml::Value>().map_err(|error| {
+                gry_core::GryError::invalid(format!(
+                    "refusing to edit {}: not valid TOML ({error})",
+                    path.display()
+                ))
+            })?;
+        }
         let block = format!("\n[mcp_servers.gry]\ncommand = {exe:?}\nargs = [\"serve\"]\n");
         let updated = if existing.contains("[mcp_servers.gry]") {
             replace_toml_section(&existing, "mcp_servers.gry", block.trim_start())
@@ -1563,6 +1634,32 @@ fn configure_client(
             "refusing to edit {}: top-level JSON is not an object",
             path.display()
         )));
+    }
+    let require_object = |key: &str| -> gry_core::GryResult<()> {
+        if root.get(key).is_some_and(|value| !value.is_object()) {
+            return Err(gry_core::GryError::invalid(format!(
+                "refusing to edit {}: {key} is not an object",
+                path.display()
+            )));
+        }
+        Ok(())
+    };
+    match client {
+        "opencode" => require_object("mcp")?,
+        "zed" => require_object("context_servers")?,
+        "vscode" => require_object("servers")?,
+        "ohgo" => {
+            require_object("mcp")?;
+            if let Some(mcp) = root.get("mcp") {
+                if mcp.get("servers").is_some_and(|value| !value.is_array()) {
+                    return Err(gry_core::GryError::invalid(format!(
+                        "refusing to edit {}: mcp.servers is not an array",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        _ => require_object("mcpServers")?,
     }
     let entry = json!({
         "command": exe,
@@ -1629,11 +1726,49 @@ fn configure_client(
             if !root["mcp"].is_object() {
                 root["mcp"] = json!({});
             }
-            root["mcp"]["gry"] = json!({
-                "type": "local",
-                "command": [exe, "serve"],
-                "enabled": true
-            });
+            let mcp = root["mcp"].as_object_mut().expect("mcp object");
+            if mcp.get("servers").is_some_and(|value| !value.is_object()) {
+                return Err(gry_core::GryError::invalid(format!(
+                    "refusing to edit {}: mcp.servers is not an object",
+                    path.display()
+                )));
+            }
+            // OpenCode V2 stores named servers under mcp.servers. A V1
+            // `mcp.gry` entry is migrated only when it has the shape this
+            // installer writes; anything else is a user conflict.
+            if let Some(legacy) = mcp.get("gry").cloned() {
+                if looks_like_opencode_entry(&legacy) {
+                    if !mcp.get("servers").map(Value::is_object).unwrap_or(false) {
+                        mcp.insert("servers".into(), json!({}));
+                    }
+                    let servers = mcp
+                        .get_mut("servers")
+                        .and_then(Value::as_object_mut)
+                        .expect("servers object");
+                    servers.entry("gry".to_string()).or_insert(legacy);
+                    mcp.remove("gry");
+                } else if force {
+                    mcp.remove("gry");
+                } else {
+                    return Err(gry_core::GryError::invalid(
+                        "refusing to replace a non-gry legacy mcp.gry entry; remove it manually or pass --force",
+                    ));
+                }
+            }
+            if !mcp.get("servers").map(Value::is_object).unwrap_or(false) {
+                mcp.insert("servers".into(), json!({}));
+            }
+            let servers = mcp
+                .get_mut("servers")
+                .and_then(Value::as_object_mut)
+                .expect("servers object");
+            servers.insert(
+                "gry".into(),
+                json!({
+                    "type": "local",
+                    "command": [exe, "serve"],
+                }),
+            );
         }
         "zed" => {
             if !root["context_servers"].is_object() {
@@ -1812,12 +1947,32 @@ fn uninstall_cmd(cmd: &UninstallCmd) -> gry_core::GryResult<()> {
             .clone()
             .unwrap_or_else(|| client_config_path(client));
         match uninstall_client(client, &path, cmd.dry_run) {
-            Ok(value) => removed.push(value),
+            Ok(value) => match uninstall_hooks(client, cmd.dry_run) {
+                Ok(hooks) => {
+                    let mut value = value;
+                    value["hooks"] = hooks;
+                    removed.push(value);
+                    if !cmd.dry_run {
+                        let _ = forget_manifest(client);
+                    }
+                }
+                Err(error) => {
+                    removed.push(value);
+                    failed.push(json!({"client": client, "error": error.to_string()}));
+                }
+            },
             Err(error) => failed.push(json!({"client": client, "error": error.to_string()})),
         }
     }
     if !multi {
         if let Some(error) = failed.first() {
+            if let Some(value) = removed.first() {
+                print_value(value);
+                return Err(gry_core::GryError::invalid(format!(
+                    "partial: {}",
+                    error["error"].as_str().unwrap_or("client uninstall failed")
+                )));
+            }
             return Err(gry_core::GryError::invalid(
                 error["error"]
                     .as_str()
@@ -1858,19 +2013,36 @@ fn uninstall_client(client: &str, path: &Path, dry_run: bool) -> gry_core::GryRe
     }
     if client == "codex" {
         let text = std::fs::read_to_string(path)?;
+        if !text.trim().is_empty() {
+            text.parse::<toml::Value>().map_err(|error| {
+                gry_core::GryError::invalid(format!(
+                    "refusing to edit {}: not valid TOML ({error})",
+                    path.display()
+                ))
+            })?;
+        }
+        if text.contains("[mcp_servers.gry]") && !codex_section_looks_like_gry(&text) {
+            return Err(gry_core::GryError::invalid(format!(
+                "refusing to remove a non-gry [mcp_servers.gry] section from {}; remove it manually",
+                path.display()
+            )));
+        }
         let updated = remove_toml_section(&text, "mcp_servers.gry");
         if dry_run {
             return Ok(
                 json!({"client": client, "path": path, "dry_run": true, "content": updated}),
             );
         }
-        std::fs::write(path, updated)?;
+        if updated != text {
+            write_atomic(path, updated.as_bytes())?;
+        }
         return Ok(json!({"client": client, "path": path, "status": "removed"}));
     }
     let bytes = std::fs::read(path)?;
     let mut root: Value = serde_json::from_slice(&bytes).map_err(|e| {
         gry_core::GryError::invalid(format!("cannot parse {}: {e}", path.display()))
     })?;
+    let mut found = false;
     match client {
         "ohgo" => {
             if let Some(servers) = root
@@ -1879,12 +2051,50 @@ fn uninstall_client(client: &str, path: &Path, dry_run: bool) -> gry_core::GryRe
                 .and_then(|mcp| mcp.get_mut("servers"))
                 .and_then(Value::as_array_mut)
             {
-                servers.retain(|server| server.get("name").and_then(Value::as_str) != Some("gry"));
+                let before = servers.len();
+                let mut conflict = false;
+                servers.retain(|server| {
+                    if server.get("name").and_then(Value::as_str) != Some("gry") {
+                        return true;
+                    }
+                    if looks_like_command_entry(server) {
+                        false
+                    } else {
+                        conflict = true;
+                        true
+                    }
+                });
+                if conflict {
+                    return Err(gry_core::GryError::invalid(
+                        "refusing to remove a non-gry OHGO MCP server named gry",
+                    ));
+                }
+                found = servers.len() != before;
             }
         }
         "opencode" => {
-            if let Some(map) = root.get_mut("mcp").and_then(Value::as_object_mut) {
-                map.remove("gry");
+            if let Some(mcp) = root.get_mut("mcp").and_then(Value::as_object_mut) {
+                if let Some(servers) = mcp.get_mut("servers").and_then(Value::as_object_mut) {
+                    if let Some(entry) = servers.get("gry") {
+                        if !looks_like_opencode_entry(entry) {
+                            return Err(gry_core::GryError::invalid(
+                                "refusing to remove a non-gry OpenCode mcp.servers.gry entry",
+                            ));
+                        }
+                        servers.remove("gry");
+                        found = true;
+                    }
+                }
+                // Legacy V1 location, removed only when it has our shape.
+                if let Some(entry) = mcp.get("gry") {
+                    if !looks_like_opencode_entry(entry) {
+                        return Err(gry_core::GryError::invalid(
+                            "refusing to remove a non-gry legacy OpenCode mcp.gry entry",
+                        ));
+                    }
+                    mcp.remove("gry");
+                    found = true;
+                }
             }
         }
         "zed" => {
@@ -1892,25 +2102,118 @@ fn uninstall_client(client: &str, path: &Path, dry_run: bool) -> gry_core::GryRe
                 .get_mut("context_servers")
                 .and_then(Value::as_object_mut)
             {
-                map.remove("gry");
+                if let Some(entry) = map.get("gry") {
+                    if !looks_like_zed_entry(entry) {
+                        return Err(gry_core::GryError::invalid(
+                            "refusing to remove a non-gry Zed context server named gry",
+                        ));
+                    }
+                    map.remove("gry");
+                    found = true;
+                }
             }
         }
         "vscode" => {
             if let Some(map) = root.get_mut("servers").and_then(Value::as_object_mut) {
-                map.remove("gry");
+                if let Some(entry) = map.get("gry") {
+                    if !looks_like_command_entry(entry) {
+                        return Err(gry_core::GryError::invalid(
+                            "refusing to remove a non-gry VS Code server named gry",
+                        ));
+                    }
+                    map.remove("gry");
+                    found = true;
+                }
             }
         }
         _ => {
             if let Some(map) = root.get_mut("mcpServers").and_then(Value::as_object_mut) {
-                map.remove("gry");
+                if let Some(entry) = map.get("gry") {
+                    if !looks_like_command_entry(entry) {
+                        return Err(gry_core::GryError::invalid(
+                            "refusing to remove a non-gry MCP server named gry",
+                        ));
+                    }
+                    map.remove("gry");
+                    found = true;
+                }
             }
         }
+    }
+    if !found {
+        return Ok(json!({"client": client, "path": path, "status": "not_found"}));
     }
     if dry_run {
         return Ok(json!({"client": client, "path": path, "dry_run": true, "result": root}));
     }
     write_json_atomic(path, &root)?;
     Ok(json!({"client": client, "path": path, "status": "removed"}))
+}
+
+fn looks_like_opencode_entry(entry: &Value) -> bool {
+    entry.get("type").and_then(Value::as_str) == Some("local")
+        && entry
+            .get("command")
+            .and_then(Value::as_array)
+            .map(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
+            .unwrap_or(false)
+}
+
+fn looks_like_zed_entry(entry: &Value) -> bool {
+    let command = entry.get("command");
+    command.map(Value::is_object).unwrap_or(false)
+        && command
+            .and_then(|value| value.get("args"))
+            .and_then(Value::as_array)
+            .map(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
+            .unwrap_or(false)
+}
+
+fn looks_like_command_entry(entry: &Value) -> bool {
+    let has_serve = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_array)
+            .map(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
+            .unwrap_or(false)
+    };
+    has_serve(entry.get("args")) || has_serve(entry.get("command").filter(|value| value.is_array()))
+}
+
+fn codex_section_looks_like_gry(text: &str) -> bool {
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            inside = trimmed.trim_matches(['[', ']']).trim() == "mcp_servers.gry";
+            continue;
+        }
+        if inside && trimmed.replace(' ', "").contains("args=[\"serve\"]") {
+            return true;
+        }
+    }
+    false
+}
+
+fn project_for_root(store: &Store, cwd: &Path) -> gry_core::GryResult<String> {
+    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let mut best: Option<(usize, String)> = None;
+    for project in store.projects()? {
+        let root = PathBuf::from(&project.root_path);
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        if cwd.starts_with(&root) {
+            let depth = root.components().count();
+            if best.as_ref().map(|(d, _)| depth > *d).unwrap_or(true) {
+                best = Some((depth, project.name));
+            }
+        }
+    }
+    best.map(|(_, name)| name).ok_or_else(|| {
+        gry_core::GryError::invalid(format!(
+            "no indexed project contains {}; run: gry index {}",
+            cwd.display(),
+            cwd.display()
+        ))
+    })
 }
 
 fn hook_cmd(config: &Config, cmd: &HookCmd) -> gry_core::GryResult<()> {
@@ -1942,11 +2245,17 @@ fn hook_cmd(config: &Config, cmd: &HookCmd) -> gry_core::GryResult<()> {
                 .map(str::to_string)
         })
         .unwrap_or_default();
-    if project.is_empty() {
-        return Err(gry_core::GryError::invalid(
-            "project is required (use --project or a JSON input)",
-        ));
-    }
+    let store = open_store(config)?;
+    // `auto` resolves the indexed project whose root contains the working
+    // directory. It never guesses from a project count: a hook running in an
+    // unindexed directory must fail closed instead of borrowing another
+    // repository's evidence.
+    let project = if project.is_empty() || project == "auto" {
+        let cwd = std::env::current_dir()?;
+        project_for_root(&store, &cwd)?
+    } else {
+        project
+    };
     let task = cmd.task.clone().or_else(|| {
         input
             .get("task")
@@ -2011,7 +2320,6 @@ fn hook_cmd(config: &Config, cmd: &HookCmd) -> gry_core::GryResult<()> {
         cache: !cmd.no_cache,
         cache_ttl_secs: cmd.cache_ttl_secs,
     };
-    let store = open_store(config)?;
     let guard = gry_query::hooks::hook_guard_active();
     if guard {
         print_compact(&gry_query::hooks::run_hook(
@@ -2032,31 +2340,65 @@ fn hook_cmd(config: &Config, cmd: &HookCmd) -> gry_core::GryResult<()> {
 fn skill_cmd(cmd: &SkillCmd) -> gry_core::GryResult<()> {
     let skill = r#"---
 name: gry
-description: Use gry's knowledge graph for structural code questions: where a symbol is defined, who calls it, call chains, architecture, impact and coverage.
+description: Use gry's knowledge graph for structural code questions: symbol ownership, callers, call chains, architecture, impact, tests and coverage.
 ---
 
 # gry code intelligence
 
-gry is a local code knowledge graph served over MCP. Prefer it over file-by-file
-exploration for structural questions.
+gry is a local code knowledge graph served over MCP. It is optional: do not call
+it for every question. Use native read/grep when the task names an exact string,
+file, or a short linear path you can locate immediately.
 
-- `search_graph` — find symbols by name, regex, BM25 or semantic query.
-- `get_code_snippet` — read a symbol's exact source by qualified name.
-- `trace_path` — callers, callees, data flow, cross-service and infrastructure paths.
-- `query_graph` — read-only Cypher for multi-hop or aggregate questions.
-- `get_architecture` — languages, packages, entry points, routes, hotspots, cycles.
-- `search_code` — literal/regex text search with graph context.
-- `get_task_context` — bounded, provenance-labeled evidence for a task (context/scout/auditor).
-- `detect_changes` — map a diff to affected symbols and tests.
-- `check_index_coverage` — verify a cited file was actually indexed; clean is not proof of completeness.
+## Choose the cheapest path
 
-Lifecycle adapters can call `gry hook <stage>` (before_plan, before_edit, after_edit,
-before_finish) with JSON on stdin. Treat `not_indexed`, `timeout`, `stale` and `not_found` as
-explicit failures, not empty results.
+- **Native first:** exact literals, known filenames, config values, comments,
+  small local searches, and a short path you already know.
+- **GRY first:** ambiguous symbol ownership, callers/implementations,
+  cross-layer or cross-service tracing, impact analysis, tests linked to a
+  symbol, and questions that need structural context across files.
+- **Hybrid:** let GRY identify the relevant symbols and files, then read exact
+  source only for material claims.
 
-Paginate with the returned offsets/cursors. Use `search_code` or grep for
-literal text, configuration values, comments and non-code files. If a result is
-ambiguous or unresolved, say so rather than guessing.
+Avoid running GRY and native search over the same scope. If a GRY result already
+gives the exact symbol, file and range, do not rediscover it.
+
+## One call for a multi-part task
+
+Call `get_task_context` first for discovery/impact/route/test questions:
+
+- `task` = the user's question; omit `project` to use the workspace root.
+- `depth: 3` for route -> controller -> use case -> repository chains.
+- `include: ["tests"]` for test or impact questions (it is added automatically
+  for tasks that mention tests, coverage, impact or change).
+- Keep `max_output_tokens` at 3200-6000. If `budget.truncated` is true, raise it
+  only when the missing part matters.
+- Read `status`, `freshness`, `evidence.complete_for_scope`, `test_coverage`
+  and `unknowns` before claiming completeness.
+
+Then read exact source with `get_code_snippet` (one call per material symbol) or
+a native read. Use `trace_path` when you need the relationship graph around one
+symbol; it returns ranges, not source, and reports candidates when a short name
+is ambiguous. Use `search_graph` with `name_pattern` for a known identifier;
+`query` is broad BM25. Use `search_code` or native grep for literals.
+
+Do not call `list_projects`, `get_graph_schema` or `check_index_coverage` as a
+setup step. They are for a real project ambiguity, query authoring, or a coverage
+doubt. Paginate only when the first page is insufficient.
+
+## MCP clients with Code Mode
+
+In OpenCode Code Mode, call `await tools.gry.get_task_context({...})` (dot form).
+Some clients fail the first GRY tool call in a fresh session with "Unknown tool";
+retry the same call once instead of calling `search` or listing projects.
+
+## Lifecycle hooks
+
+Lifecycle adapters can call `gry hook <stage>` (before_plan, before_edit,
+after_edit, before_finish) with JSON on stdin. Treat `not_indexed`, `timeout`,
+`stale` and `not_found` as explicit failures, not empty results.
+
+If a result is ambiguous, unresolved, stale or truncated, say so rather than
+guessing.
 "#;
     if cmd.install {
         // Keep the generic location, and also place the skill where Claude
@@ -2170,11 +2512,356 @@ fn backup(path: &Path) -> gry_core::GryResult<()> {
     Ok(())
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// Write bytes through a private temporary file in the destination directory.
+/// The rename is atomic on the same filesystem, so a crash leaves either the
+/// old file or the complete new one.
+fn write_atomic(path: &Path, bytes: &[u8]) -> gry_core::GryResult<()> {
+    let tmp = path.with_extension(format!(
+        "gry.tmp.{}.{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    let result = (|| -> gry_core::GryResult<()> {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&tmp, bytes)?;
+        }
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 fn write_json_atomic(path: &Path, value: &Value) -> gry_core::GryResult<()> {
-    let tmp = path.with_extension("gry.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
-    std::fs::rename(tmp, path)?;
+    write_atomic(path, &serde_json::to_vec_pretty(value)?)
+}
+
+const INTEGRATIONS_VERSION: u64 = 1;
+const OPENCODE_ADAPTER_VERSION: u64 = 1;
+const OPENCODE_PLUGIN_SOURCE: &str = include_str!("../assets/opencode-gry.js");
+
+fn integrations_manifest_path() -> PathBuf {
+    dirs_config().join("gry/integrations.json")
+}
+
+fn opencode_plugin_path() -> PathBuf {
+    dirs_config().join("opencode/plugins/gry.js")
+}
+
+fn load_manifest() -> Value {
+    let empty = json!({"version": INTEGRATIONS_VERSION, "clients": {}});
+    let Ok(bytes) = std::fs::read(integrations_manifest_path()) else {
+        return empty;
+    };
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(mut value) if value.is_object() => {
+            if !value.get("clients").map(Value::is_object).unwrap_or(false) {
+                value["clients"] = json!({});
+            }
+            value["version"] = json!(INTEGRATIONS_VERSION);
+            value
+        }
+        _ => empty,
+    }
+}
+
+fn record_manifest(
+    client: &str,
+    config_path: &Path,
+    hooks_path: Option<&Path>,
+) -> gry_core::GryResult<()> {
+    let mut manifest = load_manifest();
+    let mut entry = json!({
+        "config": config_path.to_string_lossy(),
+        "installed_at": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Some(path) = hooks_path {
+        let bytes = std::fs::read(path)?;
+        entry["hooks"] = json!({
+            "path": path.to_string_lossy(),
+            "sha256": sha256_hex(&bytes),
+            "adapter_version": OPENCODE_ADAPTER_VERSION,
+            "events": ["before_plan", "before_edit", "after_edit"],
+            "unsupported_events": ["before_finish"],
+        });
+    }
+    manifest["clients"][client] = entry;
+    let path = integrations_manifest_path();
+    ensure_parent(&path)?;
+    write_json_atomic(&path, &manifest)
+}
+
+fn forget_manifest(client: &str) -> gry_core::GryResult<()> {
+    let path = integrations_manifest_path();
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut manifest = load_manifest();
+    let Some(clients) = manifest.get_mut("clients").and_then(Value::as_object_mut) else {
+        return Ok(());
+    };
+    if clients.remove(client).is_none() {
+        return Ok(());
+    }
+    write_json_atomic(&path, &manifest)
+}
+
+fn install_hooks(
+    client: &str,
+    exe: &str,
+    dry_run: bool,
+    force: bool,
+) -> gry_core::GryResult<Value> {
+    if client != "opencode" {
+        return Err(gry_core::GryError::invalid(format!(
+            "native lifecycle hooks are not implemented for {client}; supported: opencode"
+        )));
+    }
+    let path = opencode_plugin_path();
+    let content = OPENCODE_PLUGIN_SOURCE.replace(
+        "\"__GRY_BIN__\"",
+        &serde_json::to_string(exe).unwrap_or_else(|_| "\"gry\"".to_string()),
+    );
+    if dry_run {
+        return Ok(json!({
+            "status": "would_install",
+            "path": path,
+            "adapter_version": OPENCODE_ADAPTER_VERSION,
+            "events": ["before_plan", "before_edit", "after_edit"],
+            "unsupported_events": ["before_finish"],
+        }));
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() {
+            return Err(gry_core::GryError::invalid(format!(
+                "refusing to write hook adapter through symlink {}",
+                path.display()
+            )));
+        }
+    }
+    let mut status = "installed";
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if existing == content {
+            status = "unchanged";
+        } else {
+            let manifest = load_manifest();
+            let managed = manifest["clients"]["opencode"]["hooks"]["sha256"]
+                .as_str()
+                .map(|hash| hash == sha256_hex(existing.as_bytes()))
+                .unwrap_or(false);
+            if !managed && !force {
+                return Err(gry_core::GryError::invalid(format!(
+                    "refusing to overwrite {}: it is not managed by gry (pass --force to replace it)",
+                    path.display()
+                )));
+            }
+            status = "updated";
+        }
+    }
+    if status != "unchanged" {
+        ensure_parent(&path)?;
+        write_atomic(&path, content.as_bytes())?;
+    }
+    Ok(json!({
+        "status": status,
+        "path": path,
+        "adapter_version": OPENCODE_ADAPTER_VERSION,
+        "sha256": sha256_hex(content.as_bytes()),
+        "events": ["before_plan", "before_edit", "after_edit"],
+        "unsupported_events": ["before_finish"],
+    }))
+}
+
+fn uninstall_hooks(client: &str, dry_run: bool) -> gry_core::GryResult<Value> {
+    if client != "opencode" {
+        return Ok(json!({"status": "not_applicable"}));
+    }
+    let path = opencode_plugin_path();
+    if !path.exists() {
+        return Ok(json!({"status": "not_found", "path": path}));
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() {
+            return Err(gry_core::GryError::invalid(format!(
+                "refusing to remove a symlinked hook adapter {}",
+                path.display()
+            )));
+        }
+    }
+    let manifest = load_manifest();
+    let managed = manifest["clients"]["opencode"]["hooks"]["sha256"]
+        .as_str()
+        .map(str::to_string);
+    let existing = std::fs::read(&path)?;
+    if managed.as_deref() != Some(sha256_hex(&existing).as_str()) {
+        return Err(gry_core::GryError::invalid(format!(
+            "refusing to remove {}: it differs from the file gry installed; remove it manually",
+            path.display()
+        )));
+    }
+    if dry_run {
+        return Ok(json!({"status": "would_remove", "path": path, "dry_run": true}));
+    }
+    std::fs::remove_file(&path)?;
+    Ok(json!({"status": "removed", "path": path}))
+}
+
+fn integrations_cmd(verify: bool) -> gry_core::GryResult<()> {
+    let manifest = load_manifest();
+    let mut rows = Vec::new();
+    if let Some(clients) = manifest.get("clients").and_then(Value::as_object) {
+        let mut names: Vec<&String> = clients.keys().collect();
+        names.sort();
+        for client in names {
+            let entry = &clients[client];
+            let config = entry
+                .get("config")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            let mcp = if config.as_os_str().is_empty() {
+                json!({"status": "unknown"})
+            } else {
+                mcp_entry_status(client, &config)
+            };
+            let hooks = entry.get("hooks").map(|hooks| {
+                let path = hooks
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+                    .unwrap_or_default();
+                let expected = hooks.get("sha256").and_then(Value::as_str);
+                let status = match (path.exists(), expected) {
+                    (false, _) => "missing",
+                    (true, Some(expected)) if verify => match std::fs::read(&path) {
+                        Ok(bytes) if sha256_hex(&bytes) == expected => "installed",
+                        Ok(_) => "modified",
+                        Err(_) => "unreadable",
+                    },
+                    (true, _) => "installed",
+                };
+                json!({
+                    "status": status,
+                    "path": path,
+                    "adapter_version": hooks.get("adapter_version"),
+                    "events": hooks.get("events"),
+                    "unsupported_events": hooks.get("unsupported_events"),
+                })
+            });
+            rows.push(json!({
+                "client": client,
+                "config": config,
+                "mcp": mcp,
+                "hooks": hooks,
+            }));
+        }
+    }
+    let managed = clients_of(&manifest);
+    let unmanaged: Vec<String> = detected_clients()
+        .into_iter()
+        .filter(|client| !managed.iter().any(|name| name.as_str() == *client))
+        .map(str::to_string)
+        .collect();
+    print_value(&json!({
+        "version": INTEGRATIONS_VERSION,
+        "manifest": integrations_manifest_path(),
+        "integrations": rows,
+        "detected_unmanaged": unmanaged,
+    }));
     Ok(())
+}
+
+fn clients_of(manifest: &Value) -> Vec<String> {
+    manifest
+        .get("clients")
+        .and_then(Value::as_object)
+        .map(|clients| clients.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn mcp_entry_status(client: &str, path: &Path) -> Value {
+    if !path.exists() {
+        return json!({"status": "missing", "path": path});
+    }
+    if client == "codex" {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return json!({"status": "unreadable", "path": path});
+        };
+        if !text.trim().is_empty() && text.parse::<toml::Value>().is_err() {
+            return json!({"status": "malformed", "path": path});
+        }
+        let status = if codex_section_looks_like_gry(&text) {
+            "installed"
+        } else if text.contains("[mcp_servers.gry]") {
+            "conflict"
+        } else {
+            "missing"
+        };
+        return json!({"status": status, "path": path});
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return json!({"status": "unreadable", "path": path});
+    };
+    let Ok(root) = serde_json::from_slice::<Value>(&bytes) else {
+        return json!({"status": "malformed", "path": path});
+    };
+    let entry = match client {
+        "ohgo" => root
+            .get("mcp")
+            .and_then(|mcp| mcp.get("servers"))
+            .and_then(Value::as_array)
+            .and_then(|servers| {
+                servers
+                    .iter()
+                    .find(|server| server.get("name").and_then(Value::as_str) == Some("gry"))
+            }),
+        "opencode" => root
+            .get("mcp")
+            .and_then(|mcp| mcp.get("servers"))
+            .and_then(|servers| servers.get("gry"))
+            .or_else(|| root.get("mcp").and_then(|mcp| mcp.get("gry"))),
+        "zed" => root.get("context_servers").and_then(|map| map.get("gry")),
+        "vscode" => root.get("servers").and_then(|map| map.get("gry")),
+        _ => root.get("mcpServers").and_then(|map| map.get("gry")),
+    };
+    let status = match entry {
+        None => "missing",
+        Some(value) => {
+            let ok = match client {
+                "opencode" => looks_like_opencode_entry(value),
+                "zed" => looks_like_zed_entry(value),
+                _ => looks_like_command_entry(value),
+            };
+            if ok {
+                "installed"
+            } else {
+                "conflict"
+            }
+        }
+    };
+    json!({"status": status, "path": path})
 }
 
 fn replace_toml_section(text: &str, section: &str, replacement: &str) -> String {

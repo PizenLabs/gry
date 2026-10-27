@@ -930,17 +930,32 @@ fn index_cmd(config: &Config, cmd: &IndexCmd) -> gry_core::GryResult<()> {
         .map(gry_core::fqn::sanitize_project_name)
         .unwrap_or_else(|| gry_core::fqn::project_name_from_path(root.to_string_lossy().as_ref()));
     if cmd.status {
-        if let Some(status) = read_job_status(config, &project) {
+        let job = read_job_status(config, &project);
+        if let Some(status) = &job {
             let state = status.get("state").and_then(Value::as_str).unwrap_or("");
-            if matches!(state, "queued" | "running" | "cancelling") {
-                print_value(&status);
+            if matches!(
+                state,
+                "queued" | "running" | "cancelling" | "failed" | "cancelled"
+            ) {
+                print_value(status);
                 return Ok(());
             }
         }
         let store = open_store(config)?;
-        let record = store
-            .project(&project)?
-            .ok_or_else(|| gry_core::GryError::ProjectNotFound(project.clone()))?;
+        let record = match store.project(&project)? {
+            Some(record) => record,
+            None => {
+                // The worker may have published a terminal `succeeded` status
+                // a moment before the graph became visible here.
+                if let Some(status) = job {
+                    if status.get("state").and_then(Value::as_str) == Some("succeeded") {
+                        print_value(&status);
+                        return Ok(());
+                    }
+                }
+                return Err(gry_core::GryError::ProjectNotFound(project.clone()));
+            }
+        };
         print_value(&json!({
             "project": project,
             "state": "succeeded",
@@ -960,6 +975,21 @@ fn index_cmd(config: &Config, cmd: &IndexCmd) -> gry_core::GryResult<()> {
         target_projects: cmd.targets.clone(),
     };
     if cmd.r#async {
+        let started_at = gry_store::now_iso();
+        // Publish `queued` before spawning: the worker writes `running` and
+        // then its terminal state, so a write after `spawn()` can overwrite
+        // progress the worker already recorded.
+        write_job_status(
+            config,
+            &project,
+            &json!({
+                "project": project,
+                "state": "queued",
+                "started_at": started_at,
+                "finished_at": Value::Null,
+                "error": Value::Null,
+            }),
+        );
         let exe = std::env::current_exe()?;
         let mut command = std::process::Command::new(exe);
         command
@@ -987,17 +1017,31 @@ fn index_cmd(config: &Config, cmd: &IndexCmd) -> gry_core::GryResult<()> {
                 });
             }
         }
-        let child = command.spawn()?;
-        let status = json!({
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                write_job_status(
+                    config,
+                    &project,
+                    &json!({
+                        "project": project,
+                        "state": "failed",
+                        "started_at": started_at,
+                        "finished_at": gry_store::now_iso(),
+                        "error": e.to_string(),
+                    }),
+                );
+                return Err(e.into());
+            }
+        };
+        print_value(&json!({
             "project": project,
             "state": "queued",
             "pid": child.id(),
-            "started_at": gry_store::now_iso(),
+            "started_at": started_at,
             "finished_at": Value::Null,
             "error": Value::Null,
-        });
-        write_job_status(config, &project, &status);
-        print_value(&status);
+        }));
         return Ok(());
     }
     let indexer = Indexer::new(config.clone());

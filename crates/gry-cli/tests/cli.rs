@@ -467,9 +467,11 @@ fn async_index_and_status() {
         ],
     );
     assert_eq!(queued["state"], "queued");
+    // Poll immediately: the status file is published before the worker is
+    // spawned, so the first poll must already observe the job.
     let mut succeeded = false;
-    for _ in 0..40 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
         let status = run(
             &cache,
             &[
@@ -480,16 +482,52 @@ fn async_index_and_status() {
                 "--status",
             ],
         );
-        let state = status["state"].as_str().unwrap_or("");
-        if state == "succeeded" {
-            succeeded = true;
+        match status["state"].as_str().unwrap_or("") {
+            "succeeded" => {
+                succeeded = true;
+                break;
+            }
+            "failed" | "cancelled" => panic!("async index {status}"),
+            _ => {}
+        }
+        if std::time::Instant::now() >= deadline {
             break;
         }
-        if state == "failed" {
-            panic!("async index failed: {status}");
-        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
     assert!(succeeded, "async index did not finish");
+}
+
+#[test]
+fn index_status_reports_a_failed_job() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    let jobs = cache.join("jobs");
+    fs::create_dir_all(&jobs).unwrap();
+    fs::write(
+        jobs.join("cli-failed.json"),
+        json!({
+            "project": "cli-failed",
+            "state": "failed",
+            "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": "2026-01-01T00:00:01Z",
+            "error": "boom",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let status = run(
+        &cache,
+        &[
+            "index",
+            root.to_str().unwrap(),
+            "--name",
+            "cli-failed",
+            "--status",
+        ],
+    );
+    assert_eq!(status["state"], "failed");
+    assert_eq!(status["error"], "boom");
 }
 
 #[test]

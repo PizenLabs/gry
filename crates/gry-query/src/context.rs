@@ -16,9 +16,20 @@ use gry_store::Store;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const CONTEXT_PROFILES: &[&str] = &["context", "scout", "auditor"];
+
+/// Bumped when the meaning of context evidence changes in a way that makes a
+/// previously cached payload unsafe to reuse. Hook caches carry this value.
+pub const CONTEXT_CONTRACT_VERSION: u32 = 2;
+
+/// Freshness is bounded. At most this many referenced paths are hash-checked
+/// and this many of their parent directories are scanned for added files.
+const FRESHNESS_MAX_PATHS: usize = 64;
+const FRESHNESS_MAX_SCAN_DIRS: usize = 16;
+const FRESHNESS_MAX_SCAN_ENTRIES: usize = 2000;
+const FRESHNESS_MAX_HASH_BYTES: u64 = 8 * 1024 * 1024;
 pub const CONTEXT_INCLUDES: &[&str] = &[
     "callers", "callees", "imports", "services", "tests", "changes", "coverage",
 ];
@@ -262,7 +273,10 @@ pub fn get_task_context(store: &Store, req: &ContextRequest) -> gry_core::GryRes
                     direction,
                     depth,
                     edge_types: edge_types.clone(),
-                    include_tests: profile == "auditor",
+                    include_tests: profile == "auditor"
+                        || includes
+                            .iter()
+                            .any(|i| matches!(i.as_str(), "tests" | "callers" | "callees")),
                     limit: trace_limit,
                     parameter_name: None,
                 };
@@ -436,6 +450,7 @@ pub fn get_task_context(store: &Store, req: &ContextRequest) -> gry_core::GryRes
     let services = service_rows(&node_rows);
     let boundaries = boundary_rows(&node_rows);
     let tests = test_rows(&node_rows);
+    let evidence_paths = referenced_paths(&resolved_targets, &node_rows, &req.changed_paths);
     let coverage = coverage_report(
         store,
         &req.project,
@@ -444,15 +459,25 @@ pub fn get_task_context(store: &Store, req: &ContextRequest) -> gry_core::GryRes
         &resolved_targets,
         &req.changed_paths,
     )?;
-    let freshness = freshness_report(
+    let mut freshness_check = verify_freshness(
         store,
         &req.project,
         root,
-        &resolved_targets,
-        &node_rows,
-        &req.changed_paths,
-        expected_mismatch,
-    )?;
+        &evidence_paths,
+        &record.generation,
+    );
+    // Re-validate after the graph work: a file or the whole index can change
+    // while a query is assembling evidence. The final payload must say so
+    // rather than presenting evidence from two incompatible snapshots.
+    freshness_check.post_changed = post_check_changes(root, &freshness_check.verified_meta);
+    match store.project(&req.project) {
+        Ok(Some(current)) if current.generation != record.generation => {
+            freshness_check.generation_changed = true;
+        }
+        Ok(None) => freshness_check.generation_changed = true,
+        _ => {}
+    }
+    let freshness = freshness_report(&freshness_check, &record.generation, expected_mismatch);
 
     if truncated_traversal {
         unknowns.push(json!({
@@ -566,7 +591,7 @@ pub fn get_task_context(store: &Store, req: &ContextRequest) -> gry_core::GryRes
         out.insert("stage".into(), json!(stage));
     }
     out.insert("status".into(), json!(status));
-    out.insert("freshness".into(), freshness);
+    out.insert("freshness".into(), freshness.clone());
     out.insert(
         "targets".into(),
         json!(resolved_targets
@@ -587,6 +612,22 @@ pub fn get_task_context(store: &Store, req: &ContextRequest) -> gry_core::GryRes
         out.insert("changes".into(), change_report);
     }
     out.insert("coverage".into(), coverage);
+    let coverage_gaps = out["coverage"]["gaps"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+    out.insert(
+        "evidence".into(),
+        evidence_contract(
+            status,
+            &freshness,
+            truncated_traversal,
+            coverage_gaps,
+            false,
+            node_total,
+            node_rows.len(),
+        ),
+    );
     out.insert("unknowns".into(), json!(unknowns));
     out.insert("follow_up".into(), json!(follow_up));
     out.insert("warnings".into(), json!(warnings));
@@ -599,10 +640,10 @@ pub fn get_task_context(store: &Store, req: &ContextRequest) -> gry_core::GryRes
         out.insert(
             "map".into(),
             json!({
-                "symbols": node_rows.iter().filter(|e| e.node.label != labels::FILE).take(40)
+                "symbols": node_rows.iter().filter(|e| e.node.label != labels::FILE).take(12)
                     .map(|e| json!({"qn": e.node.qualified_name, "label": e.node.label, "role": e.role})).collect::<Vec<_>>(),
-                "files": files.iter().take(40).cloned().collect::<Vec<_>>(),
-                "services": services.iter().take(20).cloned().collect::<Vec<_>>(),
+                "files": files.iter().take(8).cloned().collect::<Vec<_>>(),
+                "services": services.iter().take(5).cloned().collect::<Vec<_>>(),
             }),
         );
     }
@@ -619,6 +660,47 @@ pub fn get_task_context(store: &Store, req: &ContextRequest) -> gry_core::GryRes
 
     let mut value = Value::Object(out);
     enforce_budget(&mut value, req.max_tokens);
+    // Budget truncation removes evidence after the contract was computed.
+    // Reflect that in the contract instead of leaving "complete" true.
+    let truncated = value
+        .get("budget")
+        .and_then(|b| b.get("truncated"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if truncated {
+        if let Some(evidence) = value.get_mut("evidence") {
+            evidence["complete_for_scope"] = json!(false);
+            evidence["safe_to_treat_as_complete"] = json!(false);
+            if let Some(reasons) = evidence.get_mut("reasons").and_then(Value::as_array_mut) {
+                reasons.push(json!("output_truncated"));
+            }
+        }
+        // The extra fields are tiny, but re-run the hard bound when they push
+        // the payload over. Preserve the truncation flag: the second pass
+        // starts from the already-trimmed payload and would otherwise look
+        // complete.
+        let max_bytes = req.max_tokens.clamp(128, 1_000_000) * 4;
+        if serde_json::to_string(&value)
+            .map(|text| text.len() > max_bytes)
+            .unwrap_or(true)
+        {
+            enforce_budget(&mut value, req.max_tokens);
+            if let Value::Object(map) = &mut value {
+                map.insert("truncated".into(), Value::Bool(true));
+                if let Some(budget) = map.get_mut("budget").and_then(Value::as_object_mut) {
+                    budget.insert("truncated".into(), Value::Bool(true));
+                    if budget
+                        .get("omitted")
+                        .and_then(Value::as_object)
+                        .map(|o| o.is_empty())
+                        .unwrap_or(true)
+                    {
+                        budget.insert("omitted".into(), json!({"payload": 1}));
+                    }
+                }
+            }
+        }
+    }
     Ok(value)
 }
 
@@ -676,6 +758,7 @@ fn edge_types_for(includes: &[String]) -> Vec<String> {
             "INHERITS",
             "IMPLEMENTS",
             "OVERRIDE",
+            "HANDLES",
         ]);
     }
     if includes.iter().any(|i| i == "imports") {
@@ -725,11 +808,10 @@ fn classify(edge: &str, direction: &str) -> (&'static str, u8) {
             3,
         ),
         "TESTS" | "TESTS_FILE" => ("test", 4),
+        "HANDLES" => (if outbound { "handled_route" } else { "handler" }, 1),
         "DEPENDS_ON" | "CONNECTS_TO" | "INFRA_MAPS" | "DEPLOYS" | "ROUTES_TO" | "USES_CONFIG"
-        | "USES_SECRET" | "USES_NETWORK" | "USES_VOLUME" | "SPAWNS" | "HANDLES"
-        | "CROSS_HTTP_CALLS" | "CROSS_GRPC_CALLS" | "CROSS_ASYNC_CALLS" | "CROSS_CHANNEL" => {
-            ("service", 2)
-        }
+        | "USES_SECRET" | "USES_NETWORK" | "USES_VOLUME" | "SPAWNS" | "CROSS_HTTP_CALLS"
+        | "CROSS_GRPC_CALLS" | "CROSS_ASYNC_CALLS" | "CROSS_CHANNEL" => ("service", 2),
         "CONFIGURES" => ("config", 4),
         _ => ("related", 5),
     }
@@ -803,7 +885,15 @@ fn insert_entry(
     evidence: Evidence,
 ) {
     let provenance = static_provenance(provenance);
-    let priority = role_priority(role);
+    let priority = if role == "target" {
+        // Not every resolved target is equally useful. A route or callable is
+        // the thing a task is about; a field/constant or a documentation
+        // section is supporting evidence and must not crowd the call chain out
+        // of a small output budget.
+        target_label_priority(&node.label)
+    } else {
+        role_priority(role)
+    };
     let key = node.qualified_name.clone();
     match entries.get_mut(&key) {
         Some(existing) => {
@@ -880,8 +970,18 @@ fn role_priority(role: &str) -> u8 {
         "service" => 2,
         "references" | "referenced_by" => 3,
         "config" => 4,
-        "test" => 4,
+        "test" => 2,
         _ => 5,
+    }
+}
+
+fn target_label_priority(label: &str) -> u8 {
+    match label {
+        labels::ROUTE | labels::FUNCTION | labels::METHOD | labels::CLASS | labels::INTERFACE => 0,
+        labels::FILE | labels::MODULE | labels::PACKAGE | labels::FOLDER => 1,
+        labels::FIELD | labels::CONSTANT | labels::VARIABLE => 2,
+        "Section" | "Document" | "Doc" | "ADR" | "Heading" => 4,
+        _ => 3,
     }
 }
 
@@ -1221,14 +1321,23 @@ fn task_targets(
         return Ok(Vec::new());
     }
     let mut targets = Vec::new();
+    let routes = task_http_routes(task);
+    let requested_paths: HashSet<String> = routes.iter().map(|(_, path)| path.clone()).collect();
+    for (method, path) in &routes {
+        let qn = format!("__route__{method}__{path}");
+        if store.resolve_node(project, &qn)?.is_some() && !targets.contains(&qn) {
+            targets.push(qn);
+        }
+    }
     for word in &words {
-        if looks_like_path(word) {
+        if looks_like_path(word) && !requested_paths.contains(word) {
             targets.push(word.clone());
         }
     }
     let query = words.join(" ");
     let mut queries = vec![query];
     queries.extend(words.iter().cloned());
+    let mut docs: Vec<String> = Vec::new();
     for query in queries {
         if targets.len() >= limit {
             break;
@@ -1236,26 +1345,73 @@ fn task_targets(
         let Some(hits) = store.bm25(project, &query, None, None, None, None, limit, 0)? else {
             continue;
         };
-        // Prefer declarations over container/file nodes for task relevance.
-        let ordered = hits
-            .hits
-            .iter()
-            .filter(|hit| !is_container_label(&hit.node.label))
-            .chain(
-                hits.hits
-                    .iter()
-                    .filter(|hit| is_container_label(&hit.node.label)),
-            );
-        for hit in ordered {
-            if !targets.contains(&hit.node.qualified_name) {
-                targets.push(hit.node.qualified_name.clone());
+        for hit in &hits.hits {
+            let node = &hit.node;
+            // A task that names an HTTP method and path is asking about that
+            // route, not every other route that shares the verb.
+            if node.label == labels::ROUTE
+                && !requested_paths.is_empty()
+                && !requested_paths.contains(&node.name)
+            {
+                continue;
+            }
+            if is_container_label(&node.label) || is_doc_label(&node.label) {
+                if !docs.contains(&node.qualified_name) {
+                    docs.push(node.qualified_name.clone());
+                }
+                continue;
+            }
+            if !targets.contains(&node.qualified_name) {
+                targets.push(node.qualified_name.clone());
             }
             if targets.len() >= limit {
                 break;
             }
         }
     }
+    // Documentation is useful tangential evidence, never a substitute for a
+    // code target that matched the same task.
+    for doc in docs {
+        if targets.len() >= limit {
+            break;
+        }
+        if !targets.contains(&doc) {
+            targets.push(doc);
+        }
+    }
     Ok(targets)
+}
+
+fn task_http_routes(task: &str) -> Vec<(String, String)> {
+    const METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+    let tokens: Vec<&str> = task.split_whitespace().collect();
+    let mut out = Vec::new();
+    for pair in tokens.windows(2) {
+        let method = pair[0]
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+            .to_ascii_uppercase();
+        if !METHODS.contains(&method.as_str()) {
+            continue;
+        }
+        let path = pair[1].trim_matches(|c: char| {
+            !(c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.' | ':' | '{' | '}'))
+        });
+        if !path.starts_with('/') {
+            continue;
+        }
+        let entry = (method, path.to_string());
+        if !out.contains(&entry) {
+            out.push(entry);
+        }
+    }
+    out
+}
+
+fn is_doc_label(label: &str) -> bool {
+    matches!(
+        label,
+        "Section" | "Document" | "Doc" | "ADR" | "Heading" | "Paragraph"
+    )
 }
 
 fn file_rows(nodes: &[&NodeEntry]) -> Vec<Value> {
@@ -1402,6 +1558,41 @@ fn test_rows(nodes: &[&NodeEntry]) -> Vec<Value> {
     rows
 }
 
+fn referenced_paths(
+    targets: &[ResolvedTarget],
+    nodes: &[&NodeEntry],
+    explicit_changed: &[String],
+) -> BTreeSet<String> {
+    let mut paths: BTreeSet<String> = BTreeSet::new();
+    for target in targets {
+        if let Some(file) = &target.file {
+            paths.insert(file.clone());
+        }
+        if let Some(node) = &target.node {
+            if !node.file_path.is_empty() {
+                paths.insert(node.file_path.clone());
+            }
+        }
+        for member in &target.members {
+            if !member.file_path.is_empty() {
+                paths.insert(member.file_path.clone());
+            }
+        }
+    }
+    for entry in nodes {
+        if !entry.node.file_path.is_empty() {
+            paths.insert(entry.node.file_path.clone());
+        }
+    }
+    for path in explicit_changed {
+        let path = normalize_path(path);
+        if !path.is_empty() {
+            paths.insert(path);
+        }
+    }
+    paths
+}
+
 fn coverage_report(
     store: &Store,
     project: &str,
@@ -1458,78 +1649,362 @@ fn coverage_report(
     }))
 }
 
-fn freshness_report(
+/// What the bounded freshness check actually verified. The caller uses this to
+/// report a precise claim instead of turning a sample into a repository-wide
+/// guarantee.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct FreshnessCheck {
+    pub referenced: usize,
+    pub checked: usize,
+    pub unverified: usize,
+    pub modified: Vec<String>,
+    pub deleted: Vec<String>,
+    pub added: Vec<String>,
+    pub unindexed: Vec<String>,
+    pub stat_only: Vec<String>,
+    pub scan_dirs: usize,
+    pub scan_entries: usize,
+    pub scan_limited: bool,
+    pub post_changed: Vec<String>,
+    pub generation_changed: bool,
+    /// Metadata captured when a path was verified clean, used for the
+    /// post-assembly concurrent-change check. Never serialized.
+    pub verified_meta: Vec<(String, i64, i64)>,
+}
+
+impl FreshnessCheck {
+    pub(crate) fn stale(&self) -> bool {
+        self.generation_changed
+            || !self.modified.is_empty()
+            || !self.deleted.is_empty()
+            || !self.added.is_empty()
+            || !self.unindexed.is_empty()
+            || !self.post_changed.is_empty()
+    }
+}
+
+/// Verify the files that contributed evidence, plus the direct directories
+/// they live in. Only a bounded sample is checked; `unverified` and
+/// `scan_limited` carry the remainder so callers never mistake this for a
+/// repository-wide scan.
+pub(crate) fn verify_freshness(
     store: &Store,
     project: &str,
     root: &Path,
-    targets: &[ResolvedTarget],
-    nodes: &[&NodeEntry],
-    explicit_changed: &[String],
-    expected_mismatch: bool,
-) -> gry_core::GryResult<Value> {
-    let mut paths: BTreeSet<String> = BTreeSet::new();
-    for target in targets {
-        if let Some(file) = &target.file {
-            paths.insert(file.clone());
-        }
-        if let Some(node) = &target.node {
-            if !node.file_path.is_empty() {
-                paths.insert(node.file_path.clone());
-            }
-        }
-        for member in &target.members {
-            if !member.file_path.is_empty() {
-                paths.insert(member.file_path.clone());
-            }
-        }
-    }
-    for entry in nodes {
-        if !entry.node.file_path.is_empty() {
-            paths.insert(entry.node.file_path.clone());
-        }
-    }
-    for path in explicit_changed {
-        paths.insert(normalize_path(path));
-    }
-    let path_list: Vec<String> = paths.iter().take(64).cloned().collect();
+    paths: &BTreeSet<String>,
+    generation: &str,
+) -> FreshnessCheck {
+    let mut check = FreshnessCheck {
+        referenced: paths.len(),
+        ..Default::default()
+    };
+    let checked_paths: Vec<String> = paths
+        .iter()
+        .filter(|p| !p.is_empty())
+        .take(FRESHNESS_MAX_PATHS)
+        .cloned()
+        .collect();
+    check.checked = checked_paths.len();
+    check.unverified = paths.len().saturating_sub(checked_paths.len());
+
     let hashes: HashMap<String, gry_core::types::FileHash> = store
-        .file_hashes_for_paths(project, &path_list)?
+        .file_hashes_for_paths(project, &checked_paths)
+        .unwrap_or_default()
         .into_iter()
         .map(|h| (h.rel_path.clone(), h))
         .collect();
-    let mut stale_paths = Vec::new();
-    for path in paths.iter().take(64) {
+
+    // Paths verified by content, kept for the post-assembly stat check.
+    let mut verified: Vec<(String, i64, i64)> = Vec::new();
+    for path in &checked_paths {
         let Some(hash) = hashes.get(path) else {
+            // The path is part of the evidence but the index has no hash for
+            // it. If the file exists, the index record is incomplete; if it is
+            // absent, there is no hash to prove deletion, so count it as
+            // unverified evidence rather than inventing a deletion.
+            if root.join(path).exists() {
+                check.unindexed.push(path.clone());
+            } else {
+                check.unverified += 1;
+            }
             continue;
         };
         let metadata = match std::fs::metadata(root.join(path)) {
             Ok(metadata) => metadata,
             Err(_) => {
-                // A deleted file that still has a hash and nodes means the
-                // index predates the deletion.
-                stale_paths.push(path.clone());
+                check.deleted.push(path.clone());
                 continue;
             }
         };
         let mtime = metadata
             .modified()
             .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_nanos() as i64)
             .unwrap_or(0);
-        if mtime != hash.mtime_ns || metadata.len() as i64 != hash.size {
-            stale_paths.push(path.clone());
+        let size = metadata.len() as i64;
+        if mtime == hash.mtime_ns && size == hash.size {
+            verified.push((path.clone(), mtime, size));
+            continue;
+        }
+        // Stat differs. Content decides whether the evidence actually changed:
+        // a touch or checkout that preserves bytes must not be reported as
+        // stale evidence.
+        match std::fs::read(root.join(path)) {
+            Ok(bytes) if bytes.len() as u64 <= FRESHNESS_MAX_HASH_BYTES => {
+                if gry_index::discover::sha256(&bytes) == hash.sha256 {
+                    verified.push((path.clone(), mtime, size));
+                } else {
+                    check.modified.push(path.clone());
+                }
+            }
+            _ => {
+                // Too large to hash within the query budget. The stat mismatch
+                // stands, so the result is conservatively stale.
+                check.modified.push(path.clone());
+            }
         }
     }
-    stale_paths.sort();
-    Ok(json!({
-        "generation": store.require_project(project)?.generation,
+
+    // New or renamed files in the same directories are relevant to the same
+    // task but have no hash row, so no referenced-path check can see them.
+    let mut all_dirs: BTreeSet<String> = BTreeSet::new();
+    for path in &checked_paths {
+        if let Some(parent) = Path::new(path).parent() {
+            let parent = parent.to_string_lossy().replace('\\', "/");
+            if !parent.is_empty() {
+                all_dirs.insert(parent);
+            }
+        }
+    }
+    if all_dirs.len() > FRESHNESS_MAX_SCAN_DIRS {
+        check.scan_limited = true;
+    }
+    let dirs: Vec<String> = all_dirs.into_iter().take(FRESHNESS_MAX_SCAN_DIRS).collect();
+    check.scan_dirs = dirs.len();
+    let mut candidates: BTreeSet<String> = BTreeSet::new();
+    'dirs: for dir in &dirs {
+        let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if check.scan_entries >= FRESHNESS_MAX_SCAN_ENTRIES {
+                check.scan_limited = true;
+                break 'dirs;
+            }
+            check.scan_entries += 1;
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let rel = format!("{dir}/{name}");
+            if checked_paths.iter().any(|p| p == &rel) {
+                continue;
+            }
+            if is_ignored_scan_path(&rel) || gry_core::language::detect(&rel).is_none() {
+                continue;
+            }
+            candidates.insert(rel);
+        }
+    }
+    let candidate_paths: Vec<String> = candidates.into_iter().collect();
+    let indexed: HashSet<String> = store
+        .file_hashes_for_paths(project, &candidate_paths)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|h| h.rel_path)
+        .collect();
+    let indexed_all: HashSet<String> = store
+        .file_hashes(project)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|h| h.rel_path)
+        .collect();
+    for path in candidate_paths {
+        if !indexed.contains(&path) && !indexed_all.contains(&path) {
+            check.added.push(path);
+        }
+    }
+
+    check.modified.sort();
+    check.deleted.sort();
+    check.added.sort();
+    check.unindexed.sort();
+    check.stat_only.sort();
+    check.verified_meta = verified;
+
+    // Generation consistency: the graph may have been republished while this
+    // query was assembling evidence. Re-read the generation and report the
+    // uncertainty instead of silently combining two snapshots.
+    match store.project(project) {
+        Ok(Some(record)) if record.generation != generation => {
+            check.generation_changed = true;
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => check.generation_changed = true,
+        Err(_) => {}
+    }
+    check
+}
+
+/// Cheap post-assembly validation: if a verified file changed while the answer
+/// was being built, the caller must not present the combination as one
+/// snapshot. Only metadata is re-read, so this stays bounded.
+pub(crate) fn post_check_changes(root: &Path, verified: &[(String, i64, i64)]) -> Vec<String> {
+    let mut changed = Vec::new();
+    for (path, mtime, size) in verified {
+        let Ok(metadata) = std::fs::metadata(root.join(path)) else {
+            changed.push(path.clone());
+            continue;
+        };
+        let now_mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        if now_mtime != *mtime || metadata.len() as i64 != *size {
+            changed.push(path.clone());
+        }
+    }
+    changed.sort();
+    changed
+}
+
+fn is_ignored_scan_path(path: &str) -> bool {
+    const IGNORED_DIRS: &[&str] = &[
+        ".git",
+        ".ohgo",
+        ".izen",
+        ".crush",
+        ".aider",
+        ".codex",
+        ".claude",
+        ".cursor",
+        "target",
+        "node_modules",
+        "dist",
+        "build",
+        "vendor",
+        "third_party",
+    ];
+    path.split('/')
+        .any(|part| IGNORED_DIRS.contains(&part) || part == ".DS_Store" || part.starts_with(".gry"))
+}
+
+fn freshness_report(check: &FreshnessCheck, generation: &str, expected_mismatch: bool) -> Value {
+    let stale_paths: Vec<String> = check
+        .modified
+        .iter()
+        .chain(check.deleted.iter())
+        .chain(check.unindexed.iter())
+        .chain(check.post_changed.iter())
+        .cloned()
+        .collect();
+    let stale = expected_mismatch || check.stale();
+    let freshness = if check.generation_changed {
+        "generation_changed"
+    } else if stale {
+        "stale"
+    } else if check.unverified > 0 || check.scan_limited {
+        "unverified"
+    } else {
+        "fresh"
+    };
+    json!({
+        "generation": generation,
         "expected_generation_mismatch": expected_mismatch,
-        "stale": expected_mismatch || !stale_paths.is_empty(),
+        "generation_changed": check.generation_changed,
+        "stale": stale,
+        "freshness": freshness,
         "stale_paths": stale_paths,
-        "total_paths": paths.len(),
-        "checked_paths": paths.len().min(64),
-    }))
+        "modified_paths": check.modified,
+        "deleted_paths": check.deleted,
+        "added_paths": check.added,
+        "unindexed_paths": check.unindexed,
+        "changed_during_query": check.post_changed,
+        "scope": "referenced_paths_and_directories",
+        "repository_scan": false,
+        "recursive_scan": false,
+        "total_paths": check.referenced,
+        "checked_paths": check.checked,
+        "unverified_paths": check.unverified,
+        "scan": {
+            "directories": check.scan_dirs,
+            "entries": check.scan_entries,
+            "limited": check.scan_limited,
+            "max_directories": FRESHNESS_MAX_SCAN_DIRS,
+            "max_entries": FRESHNESS_MAX_SCAN_ENTRIES,
+        },
+        "check_method": "sha256_on_stat_mismatch",
+        "limitations": [
+            "Freshness covers referenced paths and files directly beside them; it is not a repository-wide scan.",
+            "A change after the post-assembly check is outside this result's snapshot.",
+        ],
+    })
+}
+
+fn evidence_contract(
+    status: &str,
+    freshness: &Value,
+    truncated_traversal: bool,
+    coverage_gaps: usize,
+    budget_truncated: bool,
+    node_total: usize,
+    node_returned: usize,
+) -> Value {
+    let mut reasons: Vec<&str> = Vec::new();
+    if freshness["generation_changed"].as_bool().unwrap_or(false) {
+        reasons.push("generation_changed_during_query");
+    }
+    if freshness["stale"].as_bool().unwrap_or(false) {
+        reasons.push("stale_index");
+    }
+    if !freshness["added_paths"]
+        .as_array()
+        .map(|a| a.is_empty())
+        .unwrap_or(true)
+    {
+        reasons.push("added_files_not_indexed");
+    }
+    if freshness["unverified_paths"].as_u64().unwrap_or(0) > 0
+        || freshness["scan"]["limited"].as_bool().unwrap_or(false)
+    {
+        reasons.push("freshness_scope_bounded");
+    }
+    if truncated_traversal {
+        reasons.push("traversal_bounded");
+    }
+    if coverage_gaps > 0 {
+        reasons.push("coverage_gap");
+    }
+    if budget_truncated {
+        reasons.push("output_truncated");
+    }
+    let query_ok = !matches!(status, "timeout" | "not_found" | "empty");
+    let complete_for_scope = query_ok
+        && status != "partial"
+        && !freshness["stale"].as_bool().unwrap_or(false)
+        && freshness["unverified_paths"].as_u64().unwrap_or(0) == 0
+        && !freshness["scan"]["limited"].as_bool().unwrap_or(false)
+        && !truncated_traversal
+        && coverage_gaps == 0
+        && node_returned >= node_total;
+    json!({
+        "query_ok": query_ok,
+        "scope": "referenced_paths",
+        "complete_for_scope": complete_for_scope,
+        "safe_to_treat_as_complete": complete_for_scope,
+        "repository_scan": false,
+        "repository_complete": false,
+        "freshness": freshness["freshness"],
+        "reasons": reasons,
+        "limitation": "Repository-wide completeness is not claimed. Use an explicit re-index for a global guarantee.",
+    })
 }
 
 fn collect_changes(
@@ -1765,6 +2240,17 @@ fn minimal_payload(
         "unknowns": unknowns,
         "follow_up": [],
         "warnings": [],
+        "evidence": {
+            "query_ok": !matches!(status, "timeout" | "not_found" | "empty"),
+            "scope": "referenced_paths",
+            "complete_for_scope": false,
+            "safe_to_treat_as_complete": false,
+            "repository_scan": false,
+            "repository_complete": false,
+            "freshness": "not_checked",
+            "reasons": [status],
+            "limitation": "No evidence was assembled, so completeness is not claimed.",
+        },
         "budget": {
             "max_tokens": req.max_tokens,
             "max_bytes": req.max_tokens * 4,
@@ -1880,7 +2366,11 @@ fn trim_arrays(value: &mut Value, target: usize, omitted: &mut BTreeMap<String, 
         let Some(nodes) = value.get("nodes").and_then(Value::as_array) else {
             break;
         };
-        if nodes.len() <= 1 {
+        if nodes.len() <= 2 {
+            // Keep the resolved target plus at least one neighbour when the
+            // budget allows it; a single-node answer loses the evidence that
+            // made the target relevant. If even that is too large, the
+            // minimal-payload fallback below takes over.
             break;
         }
         let Some(removed) = nodes
@@ -2064,6 +2554,7 @@ mod tests {
         let mut files = Vec::new();
         for rel in ["src/api.rs", "src/main.rs"] {
             let metadata = std::fs::metadata(root.join(rel)).unwrap();
+            let bytes = std::fs::read(root.join(rel)).unwrap();
             let mtime_ns = metadata
                 .modified()
                 .ok()
@@ -2072,7 +2563,7 @@ mod tests {
                 .unwrap_or(0);
             files.push(FileHash {
                 rel_path: rel.into(),
-                sha256: "a".into(),
+                sha256: gry_index::discover::sha256(&bytes),
                 mtime_ns,
                 size: metadata.len() as i64,
             });
@@ -2122,6 +2613,24 @@ mod tests {
         assert!(rels
             .iter()
             .any(|r| r["type"] == "CONNECTS_TO" && r["provenance"] == "declared"));
+    }
+
+    #[test]
+    fn requested_tests_are_not_filtered_as_callers() {
+        let store = store();
+        let mut request = req("handler");
+        request.include = vec!["tests".into()];
+        let out = get_task_context(&store, &request).unwrap();
+        assert!(out["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["role"] == "test"));
+        assert!(out["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["name"] == "test_handler"));
     }
 
     #[test]
@@ -2355,6 +2864,91 @@ mod tests {
     }
 
     #[test]
+    fn completeness_is_separate_from_query_success() {
+        let store = store();
+        let out = get_task_context(&store, &req("handler")).unwrap();
+        // The graph references files that have no hash record in this fixture,
+        // so the query succeeds but completeness is not claimed.
+        assert_eq!(out["status"], "ok");
+        assert_eq!(out["evidence"]["query_ok"], true);
+        assert_eq!(out["evidence"]["complete_for_scope"], false);
+        assert_eq!(out["evidence"]["repository_scan"], false);
+        assert_eq!(out["evidence"]["repository_complete"], false);
+        assert!(out["freshness"]["unverified_paths"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn new_file_next_to_evidence_is_reported_added() {
+        let store = store();
+        let record = store.require_project("p").unwrap();
+        std::fs::write(
+            std::path::Path::new(&record.root_path).join("src/added.rs"),
+            "pub fn added() {}\n",
+        )
+        .unwrap();
+        let out = get_task_context(&store, &req("handler")).unwrap();
+        assert_eq!(out["status"], "stale");
+        assert_eq!(out["freshness"]["stale"], true);
+        assert!(out["freshness"]["added_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "src/added.rs"));
+        assert_eq!(out["evidence"]["complete_for_scope"], false);
+        assert!(out["evidence"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "added_files_not_indexed"));
+    }
+
+    #[test]
+    fn renamed_file_is_not_verified_current_evidence() {
+        let store = store();
+        let record = store.require_project("p").unwrap();
+        let root = std::path::Path::new(&record.root_path);
+        std::fs::rename(root.join("src/api.rs"), root.join("src/api_renamed.rs")).unwrap();
+        let out = get_task_context(&store, &req("handler")).unwrap();
+        assert_eq!(out["status"], "stale");
+        assert!(out["freshness"]["deleted_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "src/api.rs"));
+        assert!(out["freshness"]["added_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "src/api_renamed.rs"));
+    }
+
+    #[test]
+    fn post_assembly_check_detects_a_concurrent_edit() {
+        let store = store();
+        let record = store.require_project("p").unwrap();
+        let root = std::path::Path::new(&record.root_path);
+        let mut paths = BTreeSet::new();
+        paths.insert("src/api.rs".to_string());
+        let check = verify_freshness(&store, "p", root, &paths, &record.generation);
+        assert!(check.modified.is_empty());
+        std::fs::write(root.join("src/api.rs"), "0123456789-changed").unwrap();
+        let changed = post_check_changes(root, &check.verified_meta);
+        assert!(changed.iter().any(|p| p == "src/api.rs"));
+    }
+
+    #[test]
+    fn a_generation_change_during_a_check_is_explicit() {
+        let store = store();
+        let record = store.require_project("p").unwrap();
+        let root = std::path::Path::new(&record.root_path);
+        let mut paths = BTreeSet::new();
+        paths.insert("src/api.rs".to_string());
+        let check = verify_freshness(&store, "p", root, &paths, "older-generation");
+        assert!(check.generation_changed);
+        assert!(check.stale());
+    }
+
+    #[test]
     fn changed_caller_file_marks_the_index_stale() {
         let store = store();
         let record = store.require_project("p").unwrap();
@@ -2449,6 +3043,22 @@ mod tests {
                 text.len()
             );
         }
+    }
+
+    #[test]
+    fn unicode_task_keeps_valid_json_and_a_hard_budget() {
+        let store = store();
+        let request = ContextRequest {
+            project: "p".into(),
+            task: Some("解析 handler 请求 🚀 — escape \"quotes\"".into()),
+            max_tokens: 256,
+            ..Default::default()
+        };
+        let out = get_task_context(&store, &request).unwrap();
+        let text = serde_json::to_string(&out).unwrap();
+        assert!(serde_json::from_str::<Value>(&text).is_ok());
+        assert!(text.len() <= 256 * 4, "len={}", text.len());
+        assert!(out["budget"]["estimated_tokens"].as_u64().unwrap() <= 256);
     }
 
     #[test]

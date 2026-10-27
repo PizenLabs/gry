@@ -596,6 +596,73 @@ fn test_impact_select_and_publish() {
 }
 
 #[test]
+fn freshness_recovers_after_incremental_reindex() {
+    let (dir, root) = fixture();
+    let cache = dir.path().join("cache");
+    run(
+        &cache,
+        &["index", root.to_str().unwrap(), "--name", "cli-fresh"],
+    );
+
+    let clean = run(
+        &cache,
+        &[
+            "context",
+            "cli-fresh",
+            "--target",
+            "parse",
+            "--max-tokens",
+            "2000",
+        ],
+    );
+    assert_eq!(clean["status"], "ok");
+    assert_eq!(clean["evidence"]["complete_for_scope"], true);
+
+    write(&root, "src/added.rs", "pub fn added() {}\n");
+    let stale = run(
+        &cache,
+        &[
+            "context",
+            "cli-fresh",
+            "--target",
+            "parse",
+            "--max-tokens",
+            "2000",
+        ],
+    );
+    assert_eq!(stale["status"], "stale");
+    assert_eq!(stale["evidence"]["complete_for_scope"], false);
+    assert!(stale["freshness"]["added_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p == "src/added.rs"));
+
+    run(
+        &cache,
+        &["index", root.to_str().unwrap(), "--name", "cli-fresh"],
+    );
+    let recovered = run(
+        &cache,
+        &[
+            "context",
+            "cli-fresh",
+            "--target",
+            "parse",
+            "--max-tokens",
+            "2000",
+        ],
+    );
+    assert_eq!(recovered["status"], "ok");
+    assert_eq!(recovered["evidence"]["complete_for_scope"], true);
+    assert!(recovered["freshness"]["added_paths"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(recovered["freshness"]["freshness"], "fresh");
+}
+
+#[test]
 fn context_and_lifecycle_hooks_are_bounded_and_explicit() {
     let (dir, root) = fixture();
     let cache = dir.path().join("cache");
@@ -620,11 +687,38 @@ fn context_and_lifecycle_hooks_are_bounded_and_explicit() {
     assert_eq!(context["status"], "ok");
     assert_eq!(context["profile"], "scout");
     assert!(context["budget"]["estimated_tokens"].as_u64().unwrap() <= 800);
+    assert_eq!(context["evidence"]["query_ok"], true);
+    assert_eq!(context["evidence"]["repository_scan"], false);
+    assert_eq!(context["evidence"]["repository_complete"], false);
     assert!(context["nodes"]
         .as_array()
         .unwrap()
         .iter()
         .any(|n| n["name"] == "parse"));
+
+    // A file added after indexing must not be presented as verified current
+    // evidence. The CLI and MCP share one payload, so this also pins the
+    // external contract.
+    std::fs::write(root.join("src/added.rs"), "pub fn added() {}\n").unwrap();
+    let added = run(
+        &cache,
+        &[
+            "context",
+            "cli-context",
+            "--target",
+            "parse",
+            "--max-tokens",
+            "1600",
+        ],
+    );
+    assert_eq!(added["status"], "stale");
+    assert_eq!(added["evidence"]["complete_for_scope"], false);
+    assert!(added["freshness"]["added_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p == "src/added.rs"));
+    std::fs::remove_file(root.join("src/added.rs")).unwrap();
 
     let first = run(
         &cache,

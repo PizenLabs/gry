@@ -200,6 +200,10 @@ fn all_eighteen_tools_succeed() {
     assert_eq!(context["status"], "ok");
     assert!(context["nodes"].as_array().unwrap().len() >= 2);
     assert!(context["budget"]["estimated_tokens"].as_u64().unwrap() <= 1200);
+    assert_eq!(context["evidence"]["query_ok"], true);
+    assert_eq!(context["evidence"]["repository_scan"], false);
+    assert_eq!(context["evidence"]["repository_complete"], false);
+    assert!(context["evidence"]["complete_for_scope"].is_boolean());
     let audit = call(
         &mut srv,
         "get_task_context",

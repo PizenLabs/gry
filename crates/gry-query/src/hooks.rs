@@ -6,9 +6,12 @@
 //! independently bounded. The adapter never mutates the repository and never
 //! grants permissions.
 
-use crate::context::{get_task_context, ContextRequest};
+use crate::context::{
+    get_task_context, verify_freshness, ContextRequest, CONTEXT_CONTRACT_VERSION,
+};
 use gry_store::Store;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -183,12 +186,18 @@ fn run_hook_inner(
         "failure": failure,
     });
 
-    if req.cache && matches!(status, "ok" | "partial" | "stale") {
+    if req.cache && matches!(status, "ok" | "partial") && !context_is_stale(&context) {
         if let Some(cache_dir) = cache_dir {
             let _ = write_cache(cache_dir, &key, &record.generation, &payload);
         }
     }
     Ok(payload)
+}
+
+fn context_is_stale(context: &Value) -> bool {
+    context["freshness"]["stale"].as_bool().unwrap_or(false)
+        || context["evidence"]["freshness"].as_str() == Some("stale")
+        || context["evidence"]["freshness"].as_str() == Some("generation_changed")
 }
 
 pub fn hook_guard_active() -> bool {
@@ -199,7 +208,7 @@ pub fn context_request_for(stage: &str, req: &HookRequest) -> ContextRequest {
     let (profile, depth, includes, max_nodes) = match stage {
         "before_plan" => (
             "scout",
-            2,
+            3,
             vec!["callers", "callees", "imports", "services", "coverage"],
             40,
         ),
@@ -219,7 +228,14 @@ pub fn context_request_for(stage: &str, req: &HookRequest) -> ContextRequest {
             ],
             60,
         ),
-        _ => ("auditor", 1, vec!["changes", "tests", "coverage"], 40),
+        _ => (
+            "auditor",
+            2,
+            vec![
+                "callers", "callees", "imports", "services", "tests", "changes", "coverage",
+            ],
+            50,
+        ),
     };
     ContextRequest {
         project: req.project.clone(),
@@ -362,25 +378,18 @@ fn paths_are_fresh(store: &Store, project: &str, root_path: &str, paths: &[Strin
     if paths.is_empty() {
         return true;
     }
-    let Ok(hashes) = store.file_hashes_for_paths(project, paths) else {
+    let Ok(record) = store.require_project(project) else {
         return false;
     };
-    let root = Path::new(root_path);
-    for hash in hashes {
-        let Ok(metadata) = std::fs::metadata(root.join(&hash.rel_path)) else {
-            return false;
-        };
-        let mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos() as i64)
-            .unwrap_or(0);
-        if mtime != hash.mtime_ns || metadata.len() as i64 != hash.size {
-            return false;
-        }
-    }
-    true
+    let set: BTreeSet<String> = paths.iter().cloned().collect();
+    let check = verify_freshness(
+        store,
+        project,
+        Path::new(root_path),
+        &set,
+        &record.generation,
+    );
+    !check.stale() && check.unverified == 0
 }
 
 fn normalize_path(path: &str) -> String {
@@ -404,6 +413,7 @@ fn hook_cache_key(project: &str, generation: &str, stage: &str, req: &HookReques
     let mut changed = req.changed_paths.clone();
     changed.sort();
     let canonical = json!({
+        "contract": CONTEXT_CONTRACT_VERSION,
         "project": project,
         "generation": generation,
         "stage": stage,
@@ -431,6 +441,9 @@ fn read_cache(cache_dir: &Path, key: &str, generation: &str, req: &HookRequest) 
         return None;
     }
     let value: Value = serde_json::from_slice(&bytes).ok()?;
+    if value["contract"].as_u64() != Some(CONTEXT_CONTRACT_VERSION as u64) {
+        return None;
+    }
     if value["generation"].as_str() != Some(generation) {
         return None;
     }
@@ -453,6 +466,7 @@ fn write_cache(
     let tmp = dir.join(format!(".{key}.tmp"));
     let value = json!({
         "created_at": now_unix(),
+        "contract": CONTEXT_CONTRACT_VERSION,
         "generation": generation,
         "payload": payload,
     });
@@ -502,13 +516,7 @@ mod tests {
     fn store_with_root(root: &Path) -> Store {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/lib.rs"), "pub fn handle() {}\n").unwrap();
-        let metadata = std::fs::metadata(root.join("src/lib.rs")).unwrap();
-        let mtime_ns = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos() as i64)
-            .unwrap_or(0);
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
         let mut store = Store::open_in_memory().unwrap();
         let nodes = vec![
             NewNode::new("Function", "main", "p.src.main.main", "src/main.rs", 1, 10),
@@ -526,12 +534,23 @@ mod tests {
             "p.src.lib.handle",
             "CALLS",
         )];
-        let files = vec![FileHash {
-            rel_path: "src/lib.rs".into(),
-            sha256: "a".into(),
-            mtime_ns,
-            size: metadata.len() as i64,
-        }];
+        let mut files = Vec::new();
+        for rel in ["src/lib.rs", "src/main.rs"] {
+            let metadata = std::fs::metadata(root.join(rel)).unwrap();
+            let bytes = std::fs::read(root.join(rel)).unwrap();
+            let mtime_ns = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as i64)
+                .unwrap_or(0);
+            files.push(FileHash {
+                rel_path: rel.to_string(),
+                sha256: gry_index::discover::sha256(&bytes),
+                mtime_ns,
+                size: metadata.len() as i64,
+            });
+        }
         let root_path = root.to_string_lossy().to_string();
         let mut w = ProjectWrite::new("p", &root_path, "full", "gen-1");
         w.nodes = &nodes;
@@ -629,6 +648,24 @@ mod tests {
         let second = run_hook(&store, &req("before_edit"), Some(dir.path())).unwrap();
         assert_eq!(second["hook"]["cached"], false);
         assert_eq!(second["context"]["status"], "stale");
+    }
+
+    #[test]
+    fn cache_is_invalidated_by_a_new_file_beside_the_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let store = store_with_root(root.path());
+        let dir = tempfile::tempdir().unwrap();
+        let first = run_hook(&store, &req("before_edit"), Some(dir.path())).unwrap();
+        assert_eq!(first["hook"]["cached"], false);
+        std::fs::write(root.path().join("src/added.rs"), "pub fn added() {}\n").unwrap();
+        let second = run_hook(&store, &req("before_edit"), Some(dir.path())).unwrap();
+        assert_eq!(second["hook"]["cached"], false);
+        assert_eq!(second["context"]["status"], "stale");
+        assert!(second["context"]["freshness"]["added_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "src/added.rs"));
     }
 
     #[test]

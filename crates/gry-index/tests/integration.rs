@@ -1086,3 +1086,52 @@ fn agent_state_directories_are_never_indexed() {
         .iter()
         .any(|n| n.name == "handler"));
 }
+
+#[test]
+fn go_route_registration_links_its_handler_across_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("gomini");
+    fs::create_dir_all(&root).unwrap();
+    write(&root, "go.mod", "module example.test/gomini\n\ngo 1.22\n");
+    write(
+        &root,
+        "api/controller/task_controller.go",
+        "package controller\n\ntype TaskController struct{}\n\nfunc (tc *TaskController) Create() {}\n",
+    );
+    write(
+        &root,
+        "api/route/task_route.go",
+        "package route\n\nimport ctrl \"example.test/gomini/api/controller\"\n\ntype Group struct{}\n\nfunc (g *Group) POST(path string, handler func()) {}\n\nfunc NewTaskRouter(group *Group) {\n\ttc := &ctrl.TaskController{}\n\tgroup.POST(\"/task\", tc.Create)\n}\n",
+    );
+    let cfg = config(dir.path());
+    let indexer = Indexer::new(cfg.clone());
+    let report = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    let store = Store::open(&cfg.db_path).unwrap();
+    let trace = store
+        .trace(&gry_store::traverse::TraceParams {
+            project: report.project.clone(),
+            start_qn: format!(
+                "{}.api.controller.task_controller.TaskController.Create",
+                report.project
+            ),
+            direction: gry_store::traverse::Direction::Outbound,
+            depth: 1,
+            edge_types: vec!["HANDLES".to_string()],
+            include_tests: false,
+            limit: 10,
+            parameter_name: None,
+        })
+        .unwrap()
+        .expect("handler node was not indexed");
+    assert!(
+        trace
+            .hops
+            .iter()
+            .any(|hop| hop.via_edge == "HANDLES"
+                && hop.node.qualified_name == "__route__POST__/task"),
+        "POST /task was not linked to TaskController.Create: {:?}",
+        trace.hops
+    );
+}

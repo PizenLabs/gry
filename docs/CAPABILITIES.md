@@ -14,7 +14,7 @@ Evidence: **U** unit tests, **I** integration tests, **M** MCP/CLI contract test
 differential check against the reference implementation, **B** benchmark. Commands and results are
 in [DEVELOPMENT.md](DEVELOPMENT.md); measurements are in [BENCHMARKS.md](BENCHMARKS.md).
 
-Current result: **60 VERIFIED, 37 PARTIAL, 0 BLOCKED**. Every PARTIAL entry is an accepted limit
+Current result: **63 VERIFIED, 37 PARTIAL, 0 BLOCKED**. Every PARTIAL entry is an accepted limit
 with evidence; no required subsystem is silently absent.
 
 ## Input coverage
@@ -130,6 +130,9 @@ full list of node labels, edge types and the language set is in the [README](../
 | CTX-02 | VERIFIED | U, I, M | `context`/`scout`/`auditor` profiles share one assembly path; scout adds a compact map, auditor adds checks, verified issues, risks and missing evidence |
 | CTX-03 | VERIFIED | U, I, CLI | `gry hook` maps before_plan/before_edit/after_edit/before_finish to bounded context; JSON stdin/stdout, optional cache, `GRY_HOOK_ACTIVE` recursion guard |
 | CTX-04 | VERIFIED | U, I, CLI | Deterministic `max_output_tokens` hard limit with whole-row truncation and `budget.omitted`; explicit `not_indexed`, `unavailable`, `timeout`, `stale`, `not_found`, `empty` and `partial` outcomes |
+| CTX-05 | VERIFIED | U, I, CLI | Query success is separate from evidence: `evidence.complete_for_scope`, `repository_scan=false`, `repository_complete=false` and `reasons` explain bounded or stale evidence. Freshness hash-checks referenced files, scans their direct directories for added/renamed files, and re-validates the generation and file metadata after assembly. Not a repository-wide scan |
+| CTX-06 | VERIFIED | eval fixture (9 tasks) | Reviewed task fixture for the independent Go repository with separate precision/recall/MRR, relation, impact and freshness metrics; development and holdout sets |
+| CTX-07 | VERIFIED | B | CLI context p50 9.6–80.6 ms and 11.8–107.8 MB RSS from 57 to 20,002 files; hooks 9.6–15.3 ms; 20k-file index 8.7 s / 1.33 GB. See `eval/results/2026-10-27-context-hooks.json` |
 
 ## Operations
 
@@ -203,7 +206,11 @@ hidden failures.
   history.
 - **Watcher** is opt-in and polling-based; MCP auto-index runs only when configured.
 - **Scale**: peak RSS at 100k files is unverified; the memory budget is a pre-allocation estimate.
-  Measured: 10k files / 50k nodes at 749 MB.
+  Measured synthetic: 20,002 files / 80,207 nodes at 1.33 GB index peak; context on that graph
+  p50 80.6 ms, p95 84.9 ms, 107.8 MB RSS (10 samples; p99 not claimed).
+- **Freshness scope**: referenced paths are content-verified (SHA-256 when metadata differs) and
+  their direct directories are scanned for added files. A new file elsewhere in the repository is
+  outside the check; `evidence.repository_complete` is always false and `repository_scan` is false.
 - **PDF** uses text layers only; OCR is not supported.
 - **Dead code** is a Cypher/search workflow, not a dedicated tool.
 - **Context** is bounded evidence, not a semantic answer. `inferred` means ambiguous or
@@ -221,6 +228,13 @@ hidden failures.
   pagination are unchanged. `gry context` and `gry hook` are additive CLI commands.
 - Infrastructure edges add `ROUTES_TO`, `USES_CONFIG`, `USES_SECRET`, `USES_NETWORK` and
   `USES_VOLUME`. They are declared relationships, not inferred runtime dependencies.
+- Go methods are now type-qualified in graph identity (for example
+  `pkg.controller.TaskController.Create`) so interface dispatch and route handlers resolve to the
+  declaring type. `EXTRACTOR_VERSION` 36 forces one clean rebuild; persisted indexes from earlier
+  versions are rejected/rebuilt under the normal upgrade path. CLI/MCP field names are unchanged.
+- `get_task_context` adds `evidence` and freshness subfields (`scope`, `repository_scan`,
+  `unverified_paths`, `added_paths`, `deleted_paths`, `modified_paths`, `changed_during_query`).
+  Existing `status`, `freshness.stale`, targets, nodes and relationships keep their meaning.
 - Terraform `resource`/`data` nodes now use `terraform.resource.<type>.<name>` and
   `terraform.data.<type>.<name>` so two resources of the same type no longer collide. This changes
   those QNs and requires a re-index; the extractor version bump (27) forces one clean rebuild.

@@ -38,7 +38,7 @@ macro_rules! phase {
 // Bump whenever extraction or resolution semantics change in a way that
 // existing graphs cannot represent. A mismatch forces a clean rebuild instead
 // of a delta that would preserve stale edges.
-pub const EXTRACTOR_VERSION: &str = "27";
+pub const EXTRACTOR_VERSION: &str = "36";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexRequest {

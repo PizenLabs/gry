@@ -13,6 +13,9 @@ use gry_parse::model::{FileExtract, InfraNode};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 
+// (file, handler name, handler receiver type, route QN, route scope)
+type RouteHandlerRef = (String, String, Option<String>, String, Vec<String>);
+
 pub struct ParsedFile {
     pub discovered: DiscoveredFile,
     pub extract: FileExtract,
@@ -111,7 +114,8 @@ pub fn build(parsed: &[ParsedFile], options: &BuildOptions) -> BuildResult {
         .as_ref()
         .map(|p| p.external_symbols.clone())
         .unwrap_or_default();
-    let mut route_handlers: Vec<(String, String, String, Vec<String>)> = Vec::new();
+    // (file, handler name, handler receiver type, route QN, route scope)
+    let mut route_handlers: Vec<RouteHandlerRef> = Vec::new();
     let mut openapi_handlers: Vec<(String, String)> = Vec::new();
     let mut adr_nodes: Vec<(String, String, Option<String>)> = Vec::new();
 
@@ -294,7 +298,13 @@ pub fn build(parsed: &[ParsedFile], options: &BuildOptions) -> BuildResult {
                 .clone()
                 .or_else(|| route.scope.last().cloned())
                 .unwrap_or_default();
-            route_handlers.push((rel.clone(), handler, qn, route.scope.clone()));
+            route_handlers.push((
+                rel.clone(),
+                handler,
+                route.handler_type.clone(),
+                qn,
+                route.scope.clone(),
+            ));
         }
 
         // OpenAPI operations.
@@ -785,7 +795,7 @@ pub fn build(parsed: &[ParsedFile], options: &BuildOptions) -> BuildResult {
     crate::phase!("  inheritance/decorators", phase_start);
     let phase_start = std::time::Instant::now();
     // Route handlers and OpenAPI operation handlers.
-    for (rel, handler, route_qn, scope) in route_handlers {
+    for (rel, handler, handler_type, route_qn, scope) in route_handlers {
         let module_qn = parsed
             .iter()
             .find(|f| f.discovered.rel_path == rel)
@@ -797,6 +807,24 @@ pub fn build(parsed: &[ParsedFile], options: &BuildOptions) -> BuildResult {
                 .iter()
                 .find(|s| s.file_path == rel && s.name == handler)
                 .map(|s| s.qn.clone());
+        }
+        // A route registered from another file names its handler through a
+        // receiver (`tc.Create`). The receiver type disambiguates the many
+        // short `Create`/`Fetch` methods that a Go repository has.
+        if target.is_none() {
+            if let Some(handler_type) = handler_type.as_deref() {
+                let mut matches = symbols
+                    .iter()
+                    .filter(|s| {
+                        s.name == handler
+                            && s.scope.last().map(String::as_str) == Some(handler_type)
+                    })
+                    .map(|s| s.qn.clone());
+                let first = matches.next();
+                if matches.next().is_none() {
+                    target = first;
+                }
+            }
         }
         if target.is_none() && !scope.is_empty() {
             let qn = qn_symbol(

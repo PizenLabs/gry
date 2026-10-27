@@ -1,0 +1,366 @@
+{
+  "version": "goca-eval-v1",
+  "description": "Manually reviewed task expectations for go-backend-clean-architecture. Entity names are suffix matches; files are project-relative and exact.",
+  "repository": {
+    "name": "go-backend-clean-architecture",
+    "module": "github.com/amitshekhariitbhu/go-backend-clean-architecture",
+    "revision_note": "Fixture is used read-only. The project is indexed as a separate GRY project."
+  },
+  "k": 15,
+  "tasks": [
+    {
+      "id": "T01-http-to-repository",
+      "category": "request-trace",
+      "holdout": false,
+      "interface": "hook",
+      "stage": "before_plan",
+      "task": "Trace the POST /task HTTP request from route registration through the controller and use case to the repository call.",
+      "expected_files": [
+        "api/route/task_route.go",
+        "api/controller/task_controller.go",
+        "usecase/task_usecase.go",
+        "repository/task_repository.go",
+        "domain/task.go"
+      ],
+      "expected_symbols": [
+        "NewTaskRouter",
+        "TaskController.Create",
+        "taskUsecase.Create",
+        "taskRepository.Create"
+      ],
+      "expected_relations": [
+        {
+          "source": "TaskController.Create",
+          "type": "HANDLES",
+          "target": "__route__POST__/task"
+        },
+        {
+          "source": "TaskController.Create",
+          "type": "CALLS",
+          "target": "taskUsecase.Create"
+        },
+        {
+          "source": "taskUsecase.Create",
+          "type": "CALLS",
+          "target": "taskRepository.Create"
+        }
+      ],
+      "expected_tests": [],
+      "expected_status": [
+        "ok",
+        "partial"
+      ],
+      "freshness": "fresh",
+      "must_not_include_files": [
+        "api/controller/signup_controller.go"
+      ],
+      "rationale": "The route is registered in task_route.go, handled by TaskController.Create, delegated to taskUsecase.Create, and persisted by taskRepository.Create. The domain package declares the interfaces."
+    },
+    {
+      "id": "T02-repository-implementation",
+      "category": "interface-implementation",
+      "holdout": false,
+      "interface": "context",
+      "profile": "context",
+      "targets": [
+        "goca.repository.task_repository.taskRepository.Create"
+      ],
+      "depth": 2,
+      "include": [
+        "callers",
+        "callees",
+        "imports"
+      ],
+      "expected_files": [
+        "repository/task_repository.go",
+        "usecase/task_usecase.go",
+        "mongo/mongo.go"
+      ],
+      "expected_symbols": [
+        "taskRepository.Create",
+        "taskUsecase.Create",
+        "mongoDatabase.Collection"
+      ],
+      "expected_relations": [
+        {
+          "source": "taskUsecase.Create",
+          "type": "CALLS",
+          "target": "taskRepository.Create"
+        },
+        {
+          "source": "taskRepository.Create",
+          "type": "CALLS",
+          "target": "mongoDatabase.Collection"
+        }
+      ],
+      "expected_status": [
+        "ok",
+        "partial"
+      ],
+      "freshness": "fresh",
+      "rationale": "The concrete repository method is called by the task use case and reads through the mongo Database abstraction."
+    },
+    {
+      "id": "T03-tests-around-usecase",
+      "category": "test-selection",
+      "holdout": false,
+      "interface": "context",
+      "profile": "context",
+      "targets": [
+        "goca.usecase.task_usecase.taskUsecase.FetchByUserID"
+      ],
+      "depth": 2,
+      "include": [
+        "callers",
+        "tests"
+      ],
+      "expected_files": [
+        "usecase/task_usecase.go",
+        "usecase/task_usecase_test.go",
+        "api/controller/task_controller.go"
+      ],
+      "expected_symbols": [
+        "taskUsecase.FetchByUserID",
+        "TestFetchByUserID",
+        "TaskController.Fetch"
+      ],
+      "expected_relations": [
+        {
+          "source": "TestFetchByUserID",
+          "target": "taskUsecase.FetchByUserID",
+          "types": [
+            "TESTS",
+            "CALLS"
+          ]
+        }
+      ],
+      "expected_status": [
+        "ok",
+        "partial"
+      ],
+      "freshness": "fresh",
+      "rationale": "The use case test exercises FetchByUserID; the controller is the production caller."
+    },
+    {
+      "id": "T04-config-to-mongo",
+      "category": "configuration-trace",
+      "holdout": false,
+      "interface": "context",
+      "profile": "context",
+      "targets": [
+        "NewEnv",
+        "NewMongoDatabase"
+      ],
+      "depth": 2,
+      "include": [
+        "callers",
+        "callees",
+        "imports",
+        "services"
+      ],
+      "expected_files": [
+        "bootstrap/env.go",
+        "bootstrap/app.go",
+        "bootstrap/database.go",
+        "cmd/main.go"
+      ],
+      "expected_symbols": [
+        "NewEnv",
+        "NewMongoDatabase",
+        "App",
+        "main"
+      ],
+      "expected_relations": [
+        {
+          "source": "App",
+          "type": "CALLS",
+          "target": "NewEnv"
+        },
+        {
+          "source": "App",
+          "type": "CALLS",
+          "target": "NewMongoDatabase"
+        }
+      ],
+      "expected_status": [
+        "ok",
+        "partial"
+      ],
+      "freshness": "fresh",
+      "rationale": "Env is loaded by NewEnv, assembled by bootstrap.App, and consumed by NewMongoDatabase with the DB host/port/user/password fields."
+    },
+    {
+      "id": "T05-callers-before-edit",
+      "category": "pre-edit-callers",
+      "holdout": false,
+      "interface": "context",
+      "profile": "context",
+      "targets": [
+        "goca.usecase.task_usecase.NewTaskUsecase"
+      ],
+      "depth": 1,
+      "include": [
+        "callers"
+      ],
+      "expected_files": [
+        "usecase/task_usecase.go",
+        "api/route/task_route.go",
+        "usecase/task_usecase_test.go"
+      ],
+      "expected_symbols": [
+        "NewTaskUsecase",
+        "NewTaskRouter",
+        "TestFetchByUserID"
+      ],
+      "expected_status": [
+        "ok",
+        "partial"
+      ],
+      "freshness": "fresh",
+      "rationale": "The constructor is called by the task router and by the use case test."
+    },
+    {
+      "id": "T06-domain-change-impact",
+      "category": "change-impact",
+      "holdout": false,
+      "interface": "hook",
+      "stage": "after_edit",
+      "changed_paths": [
+        "domain/task.go"
+      ],
+      "expected_files": [
+        "domain/task.go",
+        "api/controller/task_controller.go",
+        "usecase/task_usecase.go",
+        "repository/task_repository.go"
+      ],
+      "expected_symbols": [
+        "TaskController.Create",
+        "taskUsecase.Create",
+        "taskRepository.Create"
+      ],
+      "expected_status": [
+        "ok",
+        "partial"
+      ],
+      "freshness": "fresh",
+      "impact_files": [
+        "api/controller/task_controller.go",
+        "usecase/task_usecase.go",
+        "api/route/task_route.go",
+        "usecase/task_usecase_test.go",
+        "repository/task_repository.go"
+      ],
+      "rationale": "Changing the Task domain type affects the controller, use case and repository. The changed path is caller-supplied and verified current; this task measures impact, not staleness."
+    },
+    {
+      "id": "T07-usecase-change-impact",
+      "category": "change-impact",
+      "holdout": false,
+      "interface": "hook",
+      "stage": "before_finish",
+      "changed_paths": [
+        "usecase/task_usecase.go"
+      ],
+      "expected_files": [
+        "usecase/task_usecase.go",
+        "api/controller/task_controller.go",
+        "usecase/task_usecase_test.go"
+      ],
+      "expected_symbols": [
+        "taskUsecase.Create",
+        "TaskController.Create",
+        "TestFetchByUserID"
+      ],
+      "expected_status": [
+        "ok",
+        "partial"
+      ],
+      "freshness": "fresh",
+      "impact_files": [
+        "api/controller/task_controller.go",
+        "api/route/task_route.go",
+        "usecase/task_usecase_test.go",
+        "domain/mocks/TaskUsecase.go",
+        "repository/task_repository.go"
+      ],
+      "rationale": "The controller and router depend on the use case, the use case test and mock exercise it, and the repository interface is the downstream contract."
+    },
+    {
+      "id": "T08-holdout-jwt-secret",
+      "category": "configuration-consumer",
+      "holdout": true,
+      "interface": "context",
+      "profile": "context",
+      "targets": [
+        "JwtAuthMiddleware"
+      ],
+      "depth": 2,
+      "include": [
+        "callers",
+        "callees",
+        "imports"
+      ],
+      "expected_files": [
+        "api/middleware/jwt_auth_middleware.go",
+        "api/route/route.go",
+        "bootstrap/env.go"
+      ],
+      "expected_symbols": [
+        "JwtAuthMiddleware",
+        "Setup",
+        "AccessTokenSecret"
+      ],
+      "expected_status": [
+        "ok",
+        "partial"
+      ],
+      "freshness": "fresh",
+      "rationale": "The middleware is constructed in Setup with env.AccessTokenSecret. The env field is the configuration source."
+    },
+    {
+      "id": "T09-holdout-explicit-chain",
+      "category": "request-trace",
+      "holdout": true,
+      "interface": "context",
+      "profile": "context",
+      "targets": [
+        "goca.api.controller.task_controller.TaskController.Create"
+      ],
+      "depth": 3,
+      "include": [
+        "callers",
+        "callees"
+      ],
+      "expected_files": [
+        "api/controller/task_controller.go",
+        "usecase/task_usecase.go",
+        "repository/task_repository.go"
+      ],
+      "expected_symbols": [
+        "TaskController.Create",
+        "taskUsecase.Create",
+        "taskRepository.Create"
+      ],
+      "expected_relations": [
+        {
+          "source": "TaskController.Create",
+          "type": "CALLS",
+          "target": "taskUsecase.Create"
+        },
+        {
+          "source": "taskUsecase.Create",
+          "type": "CALLS",
+          "target": "taskRepository.Create"
+        }
+      ],
+      "expected_status": [
+        "ok",
+        "partial"
+      ],
+      "freshness": "fresh",
+      "rationale": "Explicit-symbol variant of T01, reserved as a holdout to detect overfitting to the natural-language task."
+    }
+  ],
+  "max_tokens": 6000
+}

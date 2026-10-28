@@ -52,14 +52,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      - name: Configure musl compiler and linker
+      # Only the C compiler is taken from musl-tools. The linker is left to the
+      # default driver so rustc links its bundled, self-contained musl; older
+      # musl-gcc wrappers (Ubuntu 22.04 ships 1.2.2) ignore `-static-pie` and
+      # silently emit a dynamically linked PIE that segfaults at startup.
+      - name: Configure musl compiler
         if: matrix.musl
         shell: bash
         run: |
           target_env="$(echo '${{ matrix.target }}' | tr '-' '_')"
-          target_upper="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
           echo "CC_${target_env}=musl-gcc" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_${target_upper}_LINKER=musl-gcc" >> "$GITHUB_ENV"
 
       - name: Build
         env:
@@ -75,6 +77,15 @@ jobs:
           cp LICENSE README.md dist/
           if [ "${{ runner.os }}" = "macOS" ]; then
             codesign --force --sign - dist/gry
+          fi
+          if [ "${{ matrix.musl }}" = "true" ]; then
+            # musl artifacts must be static; a dynamic PIE needs a musl loader
+            # and used to segfault on startup.
+            if ! file dist/gry | grep -qE 'static-pie linked|statically linked'; then
+              echo "error: ${{ matrix.target }} binary is not statically linked" >&2
+              file dist/gry >&2
+              exit 1
+            fi
           fi
           ./dist/gry --version
           tar -C dist -czf "dist/gry-${{ matrix.target }}.tar.gz" gry LICENSE README.md

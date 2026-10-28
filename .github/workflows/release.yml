@@ -101,21 +101,33 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
 
-      - name: Generate checksums and include installer
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets and generate checksums
         shell: bash
         run: |
           set -euo pipefail
-          cp scripts/install.sh dist/install.sh
-          chmod +x dist/install.sh
+          mkdir -p dist
+          
+          # Flatten artifacts downloaded into subdirectories into a clean dist directory
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) -exec cp {} dist/
+
+          # Copy install script
+          if [ -f scripts/install.sh ]; then
+            cp scripts/install.sh dist/install.sh
+            chmod +x dist/install.sh
+          fi
+
+          # Generate aggregated SHA256SUMS file
           (cd dist && sha256sum *.tar.gz | sort -k2 > SHA256SUMS)
           cat dist/SHA256SUMS
 
-      - uses: softprops/action-gh-release@v2
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true

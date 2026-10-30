@@ -1,27 +1,71 @@
 name: CI
 
+# Continuous integration only. Every job runs on GitHub-hosted Ubuntu x86_64,
+# which is free and unmetered for public repositories.
+#
+# Routine checks never cross-compile: release targets are built only by
+# release.yml on version tags.
+
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    name: Check, lint, and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: for f in scripts/*.sh; do bash -n "$f"; done
-      - run: cargo test --workspace
-      - run: bash scripts/install_test.sh
-      - run: cargo package --workspace --locked --no-verify
-      - run: cargo build --release --bin gry
-      - run: ./target/release/gry --version
-      - run: ./target/release/gry doctor --json
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check shell scripts
+        run: for f in scripts/*.sh; do bash -n "$f"; done
+
+      - name: Check
+        run: cargo check --workspace --all-targets --locked
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Installer tests
+        run: bash scripts/install_test.sh
+
+      - name: Package check
+        run: cargo package --workspace --locked --no-verify
+
+      - name: Build and smoke-test the native binary
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --bin gry
+          ./target/release/gry --version
+          ./target/release/gry doctor --json

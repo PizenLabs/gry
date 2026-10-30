@@ -1,5 +1,22 @@
 name: Release
 
+# Zero-cost release pipeline.
+#
+# Every job runs on GitHub-hosted Ubuntu x86_64 runners. Standard runners are
+# free and unmetered for public repositories, so no paid macOS/Windows compute
+# is ever consumed.
+#
+# Cross-compilation strategy (all on ubuntu-latest):
+#   * Linux (gnu + musl) and Windows (gnu) -> taiki-e/setup-cross-toolchain-action
+#   * macOS (Intel + Apple Silicon)        -> cargo-zigbuild (Zig linker)
+#
+# Apple's SDK is required to link CoreFoundation/CoreServices, which notify's
+# fsevents backend uses, so the SDK is unpacked into the runner and exposed as
+# SDKROOT. Zig emits an ad-hoc code signature for arm64 Mach-O itself, which is
+# what Apple Silicon requires in order to execute the binary.
+#
+# Release jobs run only for version tags or a manual dispatch.
+
 on:
   push:
     tags: ["v*"]
@@ -17,83 +34,158 @@ concurrency:
 
 jobs:
   build:
-    name: ${{ matrix.target }}
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-musl
-            musl: true
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            musl: true
-    runs-on: ${{ matrix.os }}
+          - target: x86_64-unknown-linux-gnu
+            platform: linux
+          - target: x86_64-unknown-linux-musl
+            platform: linux
+          - target: aarch64-unknown-linux-gnu
+            platform: linux
+          - target: aarch64-unknown-linux-musl
+            platform: linux
+          - target: x86_64-pc-windows-gnu
+            platform: windows
+          - target: x86_64-apple-darwin
+            platform: apple
+          - target: aarch64-apple-darwin
+            platform: apple
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          cache-on-failure: true
 
-      - name: Install musl toolchain
-        if: matrix.musl
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
+      - name: Install Linux/Windows cross toolchain
+        if: matrix.platform != 'apple'
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+          # Build only: QEMU/Wine runners are not needed to produce artifacts.
+          runner: none
 
-      # Only the C compiler is taken from musl-tools. The linker is left to the
-      # default driver so rustc links its bundled, self-contained musl; older
-      # musl-gcc wrappers (Ubuntu 22.04 ships 1.2.2) ignore `-static-pie` and
-      # silently emit a dynamically linked PIE that segfaults at startup.
-      - name: Configure musl compiler
-        if: matrix.musl
-        shell: bash
-        run: |
-          target_env="$(echo '${{ matrix.target }}' | tr '-' '_')"
-          echo "CC_${target_env}=musl-gcc" >> "$GITHUB_ENV"
+      - name: Install Zig (macOS cross-compilation)
+        if: matrix.platform == 'apple'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
 
-      - name: Build
-        env:
-          MACOSX_DEPLOYMENT_TARGET: "11.0"
-        run: cargo build --release --locked --target "${{ matrix.target }}" --bin gry
+      - name: Install cargo-zigbuild (macOS cross-compilation)
+        if: matrix.platform == 'apple'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
 
-      - name: Package
+      - name: Install macOS SDK (macOS cross-compilation)
+        if: matrix.platform == 'apple'
         shell: bash
         run: |
           set -euo pipefail
+          sdk="$RUNNER_TEMP/MacOSX11.3.sdk"
+          if [ ! -d "$sdk" ]; then
+            curl --retry 3 --retry-delay 2 -fsSL \
+              "https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX11.3.sdk.tar.xz" \
+              -o "$RUNNER_TEMP/MacOSX11.3.sdk.tar.xz"
+            tar -xJf "$RUNNER_TEMP/MacOSX11.3.sdk.tar.xz" -C "$RUNNER_TEMP"
+            rm -f "$RUNNER_TEMP/MacOSX11.3.sdk.tar.xz"
+          fi
+          {
+            echo "SDKROOT=$sdk"
+            echo "MACOSX_DEPLOYMENT_TARGET=11.0"
+          } >> "$GITHUB_ENV"
+
+      - name: Build (Linux/Windows)
+        if: matrix.platform != 'apple'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --target "$TARGET" --bin gry
+
+      - name: Build (macOS)
+        if: matrix.platform == 'apple'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo zigbuild --release --locked --target "$TARGET" --bin gry
+
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+
+          bin="gry"
+          if [ "$PLATFORM" = "windows" ]; then
+            bin="gry.exe"
+          fi
+
+          src="target/$TARGET/release/$bin"
+          if [ ! -f "$src" ]; then
+            echo "error: expected binary at $src" >&2
+            exit 1
+          fi
+
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/gry" dist/gry
+          cp "$src" "dist/$bin"
           cp LICENSE README.md dist/
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            codesign --force --sign - dist/gry
-          fi
-          if [ "${{ matrix.musl }}" = "true" ]; then
-            # musl artifacts must be static; a dynamic PIE needs a musl loader
-            # and used to segfault on startup.
-            if ! file dist/gry | grep -qE 'static-pie linked|statically linked'; then
-              echo "error: ${{ matrix.target }} binary is not statically linked" >&2
-              file dist/gry >&2
-              exit 1
-            fi
-          fi
-          ./dist/gry --version
-          tar -C dist -czf "dist/gry-${{ matrix.target }}.tar.gz" gry LICENSE README.md
-          if command -v sha256sum >/dev/null 2>&1; then
-            (cd dist && sha256sum "gry-${{ matrix.target }}.tar.gz" > "gry-${{ matrix.target }}.tar.gz.sha256")
-          else
-            (cd dist && shasum -a 256 "gry-${{ matrix.target }}.tar.gz" > "gry-${{ matrix.target }}.tar.gz.sha256")
-          fi
+          file "dist/$bin"
+
+          case "$PLATFORM" in
+            apple)
+              if ! file "dist/$bin" | grep -q "Mach-O 64-bit"; then
+                echo "error: $TARGET did not produce a Mach-O binary" >&2
+                exit 1
+              fi
+              ;;
+            linux)
+              if ! file "dist/$bin" | grep -q "ELF 64-bit"; then
+                echo "error: $TARGET did not produce an ELF binary" >&2
+                exit 1
+              fi
+              ;;
+            windows)
+              if ! file "dist/$bin" | grep -q "PE32+"; then
+                echo "error: $TARGET did not produce a PE32+ binary" >&2
+                exit 1
+              fi
+              ;;
+          esac
+
+          # musl artifacts must be static: a dynamic PIE needs a musl loader
+          # and segfaults on hosts that only provide glibc.
+          case "$TARGET" in
+            *-unknown-linux-musl)
+              if ! file "dist/$bin" | grep -qE "static-pie linked|statically linked"; then
+                echo "error: $TARGET binary is not statically linked" >&2
+                file "dist/$bin" >&2
+                exit 1
+              fi
+              ;;
+          esac
+
+          # x86_64 Linux binaries run natively on the build runner.
+          case "$TARGET" in
+            x86_64-unknown-linux-*) "./dist/$bin" --version ;;
+          esac
+
+          tar -C dist -czf "dist/gry-$TARGET.tar.gz" "$bin" LICENSE README.md
+          (
+            cd dist
+            sha256sum "gry-$TARGET.tar.gz" > "gry-$TARGET.tar.gz.sha256"
+          )
 
       - uses: actions/upload-artifact@v4
         with:
@@ -102,12 +194,14 @@ jobs:
             dist/gry-${{ matrix.target }}.tar.gz
             dist/gry-${{ matrix.target }}.tar.gz.sha256
           if-no-files-found: error
+          retention-days: 7
 
   release:
     name: Publish release
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -116,24 +210,19 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: dist
+          merge-multiple: true
 
       - name: Prepare release assets and generate checksums
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
-          
-          # Flatten artifacts downloaded into subdirectories into a clean dist directory
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) -exec cp {} dist/
 
-          # Copy install script
-          if [ -f scripts/install.sh ]; then
-            cp scripts/install.sh dist/install.sh
-            chmod +x dist/install.sh
-          fi
+          cp scripts/install.sh dist/install.sh
+          chmod +x dist/install.sh
 
-          # Generate aggregated SHA256SUMS file
+          # The installer matches the bare asset name in column 2, so avoid a
+          # "./" prefix here.
           (cd dist && sha256sum *.tar.gz | sort -k2 > SHA256SUMS)
           cat dist/SHA256SUMS
 
@@ -156,8 +245,14 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: publish
 
       - name: Validate packages
         run: cargo package --workspace --locked --no-verify

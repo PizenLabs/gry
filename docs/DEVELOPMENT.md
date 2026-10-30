@@ -164,7 +164,11 @@ The check is skipped with a clear message when the reference binary is not insta
    - `gry-aarch64-unknown-linux-gnu.tar.gz`
    - `gry-x86_64-unknown-linux-musl.tar.gz`
    - `gry-aarch64-unknown-linux-musl.tar.gz`
+   - `gry-x86_64-pc-windows-gnu.tar.gz`
    - `SHA256SUMS` and `install.sh`
+
+   All targets are cross-compiled on `ubuntu-latest`; no macOS or Windows
+   runners are used.
 
    The attached `install.sh` is served at
    `https://github.com/PizenLabs/gry/releases/latest/download/install.sh` and is the

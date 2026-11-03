@@ -162,7 +162,9 @@ struct ProjectsCmd {
 #[derive(Args)]
 struct SearchCmd {
     project: String,
-    query: String,
+    /// BM25 query. Omit when using --name-pattern/--qn-pattern for a
+    /// structural-only search.
+    query: Option<String>,
     #[arg(long)]
     label: Option<String>,
     #[arg(long = "name-pattern")]
@@ -558,9 +560,14 @@ fn run(cli: &Cli, config: &Config) -> gry_core::GryResult<()> {
         }
         Command::Search(cmd) => {
             let store = open_store(config)?;
+            if cmd.query.is_none() && cmd.name_pattern.is_none() && cmd.qn_pattern.is_none() {
+                return Err(gry_core::GryError::invalid(
+                    "provide a BM25 query or --name-pattern/--qn-pattern",
+                ));
+            }
             let req = gry_query::search::GraphSearchRequest {
                 project: cmd.project.clone(),
-                query: Some(cmd.query.clone()),
+                query: cmd.query.clone(),
                 label: cmd.label.clone(),
                 name_pattern: cmd.name_pattern.clone(),
                 qn_pattern: cmd.qn_pattern.clone(),
@@ -1076,10 +1083,7 @@ fn status_cmd(config: &Config, cmd: &StatusCmd, _json: bool) -> gry_core::GryRes
             if projects.len() == 1 {
                 projects[0].name.clone()
             } else if let Ok(cwd) = std::env::current_dir() {
-                store
-                    .project_by_root(&cwd.to_string_lossy())?
-                    .map(|p| p.name)
-                    .ok_or_else(|| gry_core::GryError::invalid("project is required"))?
+                project_for_root(&store, &cwd)?
             } else {
                 return Err(gry_core::GryError::invalid("project is required"));
             }
@@ -2196,24 +2200,43 @@ fn codex_section_looks_like_gry(text: &str) -> bool {
 
 fn project_for_root(store: &Store, cwd: &Path) -> gry_core::GryResult<String> {
     let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let mut best: Option<(usize, String)> = None;
-    for project in store.projects()? {
-        let root = PathBuf::from(&project.root_path);
-        let root = std::fs::canonicalize(&root).unwrap_or(root);
-        if cwd.starts_with(&root) {
-            let depth = root.components().count();
-            if best.as_ref().map(|(d, _)| depth > *d).unwrap_or(true) {
-                best = Some((depth, project.name));
-            }
+    let containing = store.projects_containing_path(&cwd)?;
+    if let Some(first) = containing.first() {
+        let depth = PathBuf::from(&first.root_path).components().count();
+        let tied: Vec<_> = containing
+            .iter()
+            .filter(|project| PathBuf::from(&project.root_path).components().count() == depth)
+            .collect();
+        if tied.len() == 1 {
+            return Ok(first.name.clone());
         }
-    }
-    best.map(|(_, name)| name).ok_or_else(|| {
-        gry_core::GryError::invalid(format!(
-            "no indexed project contains {}; run: gry index {}",
-            cwd.display(),
+        let names = tied
+            .iter()
+            .map(|project| project.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(gry_core::GryError::invalid(format!(
+            "multiple indexed projects share {}: {names}; pass --project explicitly",
             cwd.display()
-        ))
-    })
+        )));
+    }
+    let available = store
+        .projects()?
+        .into_iter()
+        .take(10)
+        .map(|project| project.name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(gry_core::GryError::invalid(format!(
+        "no indexed project contains {}; run: gry index {}{}",
+        cwd.display(),
+        cwd.display(),
+        if available.is_empty() {
+            String::new()
+        } else {
+            format!(" (indexed projects: {available})")
+        }
+    )))
 }
 
 fn hook_cmd(config: &Config, cmd: &HookCmd) -> gry_core::GryResult<()> {

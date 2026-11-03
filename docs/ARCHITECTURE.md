@@ -69,7 +69,8 @@ Core tables:
 - `observed_calls` / `observed_paths` — runtime observations keyed by QN (reindex-proof).
 - `parse_cache` — zstd-compressed per-file extraction, invalidated by SHA and extractor version.
 - `node_vectors` — int8 768-dimensional vectors for semantic ranking/relatedness.
-- `store_meta` — format/extractor version, cross-repo status, last report.
+- `store_meta` — global format/extractor markers, per-project extractor markers, cross-repo status,
+  last report.
 - `nodes_fts` — FTS5 contentless table with `contentless_delete`; camel/snake tokens are pre-split
   into the indexed columns.
 
@@ -106,8 +107,8 @@ flowchart LR
 
 1. **Discovery**: built-in skips → repository/nested `.gitignore` → global git excludes →
    `.gryignore`; symlinks skipped; file/size limits; deterministic order.
-2. **Change detection**: reuse prior SHA when mtime+size are unchanged; only changed/new files are
-   read and parsed.
+2. **Change detection**: hash the bytes already read for language disambiguation; prior content hashes
+   are never trusted on mtime/size alone. Only changed/new files are parsed.
 3. **Extraction**: tree-sitter per file, with language-specific node classification and generic
    fallbacks. Extraction records definitions, calls, imports, usages, bases, decorators, routes,
    env accesses, channels, spawns, HTTP calls, docs sections, config keys, package metadata and

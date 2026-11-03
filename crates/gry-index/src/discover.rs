@@ -6,11 +6,10 @@
 //! directories, but never the safety core (`.git`, `node_modules`, worktrees).
 
 use gry_core::language;
-use gry_core::types::FileHash;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::Match;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -243,11 +242,15 @@ fn is_skipped_filename(name: &str) -> bool {
     )
 }
 
-/// Discover files, reusing known hashes when mtime and size are unchanged.
+/// Discover files and hash every file whose bytes are read.
+///
+/// Content hashes are always recomputed. Reusing a hash because mtime and size
+/// happen to match would silently miss a same-size edit within the filesystem's
+/// timestamp resolution; the bytes are already read for language
+/// disambiguation, so hashing them is the cheap, exact option.
 pub fn discover(
     root: &Path,
     options: &DiscoverOptions,
-    known_hashes: &HashMap<String, FileHash>,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> std::io::Result<Discovery> {
     let root = root.to_path_buf();
@@ -454,10 +457,7 @@ pub fn discover(
             .map(|d| d.as_nanos() as i64)
             .unwrap_or(0);
         let size = metadata.len() as i64;
-        let sha256 = match known_hashes.get(&rel) {
-            Some(known) if known.mtime_ns == mtime_ns && known.size == size => known.sha256.clone(),
-            _ => sha256(&bytes),
-        };
+        let sha256 = sha256(&bytes);
         source_bytes += size;
         files.push(DiscoveredFile {
             rel_path: rel,
@@ -665,7 +665,6 @@ mod tests {
         let found = discover(
             dir.path(),
             &DiscoverOptions::default(),
-            &HashMap::new(),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -699,7 +698,6 @@ mod tests {
         let found = discover(
             dir.path(),
             &DiscoverOptions::default(),
-            &HashMap::new(),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -709,39 +707,38 @@ mod tests {
     }
 
     #[test]
-    fn hashes_are_reused_when_mtime_and_size_match() {
+    fn same_size_edit_with_preserved_mtime_still_changes_the_hash() {
+        use std::fs::FileTimes;
+
         let dir = tempdir().unwrap();
-        write(dir.path(), "src/main.rs", "fn main(){}");
+        let path = dir.path().join("src/main.rs");
+        write(dir.path(), "src/main.rs", "fn a() {}");
         let first = discover(
             dir.path(),
             &DiscoverOptions::default(),
-            &HashMap::new(),
             &AtomicBool::new(false),
         )
         .unwrap();
-        let known: HashMap<String, FileHash> = first
-            .files
-            .iter()
-            .map(|f| {
-                (
-                    f.rel_path.clone(),
-                    FileHash {
-                        rel_path: f.rel_path.clone(),
-                        sha256: f.sha256.clone(),
-                        mtime_ns: f.mtime_ns,
-                        size: f.size,
-                    },
-                )
-            })
-            .collect();
+        let old_hash = first.files[0].sha256.clone();
+        let old_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        // Same byte length, different content, deliberately restore the mtime:
+        // a metadata-only shortcut would reuse the stale hash here.
+        std::fs::write(&path, "fn b() {}").unwrap();
+        let handle = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        handle
+            .set_times(FileTimes::new().set_modified(old_mtime))
+            .unwrap();
+
         let second = discover(
             dir.path(),
             &DiscoverOptions::default(),
-            &known,
             &AtomicBool::new(false),
         )
         .unwrap();
-        assert_eq!(second.files[0].sha256, first.files[0].sha256);
+        assert_eq!(second.files[0].size, first.files[0].size);
+        assert_eq!(second.files[0].mtime_ns, first.files[0].mtime_ns);
+        assert_ne!(second.files[0].sha256, old_hash);
     }
 
     #[test]
@@ -755,7 +752,6 @@ mod tests {
                 max_files: Some(1),
                 ..Default::default()
             },
-            &HashMap::new(),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -773,7 +769,6 @@ mod tests {
                 mode: IndexMode::Fast,
                 ..Default::default()
             },
-            &HashMap::new(),
             &AtomicBool::new(false),
         )
         .unwrap();

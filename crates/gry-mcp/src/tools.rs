@@ -67,7 +67,7 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "search_graph",
-            description: "Find symbols by name or text. Use name_pattern for an exact/known identifier; query is broad BM25. Rows keep qn/file/lines/degree, with production code ranked before mocks and tests. Prefer get_task_context for multi-part structural tasks.",
+            description: "Find symbols by name or text. Use name_pattern for an exact/known identifier; query is broad BM25. query cannot be combined with name_pattern, qn_pattern, relationship, degree or entry-point filters; label, file_pattern, kind and namespace are supported with query. Rows keep qn/file/lines/degree, with production code ranked before mocks and tests. Prefer get_task_context for multi-part structural tasks.",
             schema: json!({
                 "type":"object",
                 "properties":{
@@ -261,11 +261,12 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "search_code",
-            description: "Graph-ranked literal or regex text search over source and non-code files. Use for exact strings, config values and comments; use search_graph for symbol discovery.",
+            description: "Graph-ranked literal or regex text search over indexed source and non-code files. Pass exactly one of pattern or its alias query. Use for exact strings, config values and comments; use search_graph for symbol discovery. Fails when the indexed repository root is unavailable instead of returning a verified empty result.",
             schema: json!({
                 "type":"object",
                 "properties":{
-                    "pattern":{"type":"string"},
+                    "pattern":{"type":"string","description":"Literal or regex text. Alias: query."},
+                    "query":{"type":"string","description":"Alias for pattern; pass exactly one."},
                     "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
                     "file_pattern":{"type":"string"},
                     "path_filter":{"type":"string"},
@@ -286,7 +287,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "max_output_tokens":{"type":"integer","minimum":128,"maximum":1000000},
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"}
                 },
-                "required":["pattern"]
+                "anyOf":[{"required":["pattern"]},{"required":["query"]}]
             }),
             read_only: true,
             destructive: false,
@@ -316,10 +317,10 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "delete_project",
-            description: "Delete a project and all its graph data.",
+            description: "Delete a project and all its graph data. project is required: deletion never falls back to the workspace default.",
             schema: json!({
                 "type":"object",
-                "properties":{"project":{"type":"string","description":"Optional; defaults to the indexed workspace root."}},
+                "properties":{"project":{"type":"string","description":"Project name. Required; deletion never defaults."}},
                 "required":["project"]
             }),
             read_only: false,
@@ -438,7 +439,7 @@ pub fn tools() -> Vec<ToolDef> {
             schema: json!({
                 "type":"object",
                 "properties":{
-                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."},
+                    "project":{"type":"string","description":"Project name. Required for ADR writes."},
                     "mode":{"type":"string","enum":["outline","get","update","set_sections","sections","store"],"default":"outline"},
                     "content":{"type":"string"},
                     "section_updates":{"type":"object","additionalProperties":{"type":"string"}},
@@ -468,7 +469,7 @@ pub fn tools() -> Vec<ToolDef> {
                         "count":{"type":"integer"}
                     },"additionalProperties":false}},
                     "label":{"type":"string"},
-                    "project":{"type":"string","description":"Optional; defaults to the indexed workspace root."}
+                    "project":{"type":"string","description":"Project name. Required for trace ingestion."}
                 },
                 "required":["traces","project"]
             }),
@@ -529,5 +530,88 @@ pub fn instructions(profile: ToolProfile) -> String {
         ToolProfile::Scout => format!(
             "scout tool profile (fast, provisional): {base} Narrow limits keep answers fast."
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn tool_schemas_are_internally_consistent() {
+        let tools = tools();
+        assert_eq!(tools.len(), 18);
+        let mut names = HashSet::new();
+        for tool in &tools {
+            assert!(names.insert(tool.name), "duplicate tool name {}", tool.name);
+            assert!(
+                !tool.description.trim().is_empty(),
+                "{} has no description",
+                tool.name
+            );
+            assert!(
+                tool.description.len() <= 700,
+                "{} description is too long for discovery ({} bytes)",
+                tool.name,
+                tool.description.len()
+            );
+            assert_eq!(
+                tool.schema["type"], "object",
+                "{} schema must be an object",
+                tool.name
+            );
+            let properties = tool.schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{} has no properties object", tool.name));
+            for required in tool
+                .schema
+                .get("required")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                let key = required.as_str().expect("required entry is a string");
+                assert!(
+                    properties.contains_key(key),
+                    "{} requires undeclared property {key}",
+                    tool.name
+                );
+            }
+            for alternative in tool
+                .schema
+                .get("anyOf")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                for required in alternative
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    let key = required.as_str().expect("required entry is a string");
+                    assert!(
+                        properties.contains_key(key),
+                        "{} anyOf requires undeclared property {key}",
+                        tool.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn search_code_documents_the_query_alias() {
+        let tools = tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "search_code")
+            .unwrap();
+        assert!(tool.schema["properties"]["query"].is_object());
+        assert!(tool.schema["properties"]["pattern"].is_object());
+        assert!(tool.schema["anyOf"].is_array());
+        assert!(tool.schema.get("required").is_none());
     }
 }

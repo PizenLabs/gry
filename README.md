@@ -257,6 +257,9 @@ resolves targets by qualified name, symbol name, file or bounded BM25 search, th
 callees, imports, service relationships, coverage, optional test-gap evidence and optional change
 evidence. Every row keeps its source location, role, distance and provenance (`verified`,
 `declared`, `inferred` or `observed`). `project` is optional when the workspace root is indexed.
+Resolution accepts the explicit name, MCP roots, the indexed root, or a descendant directory of it.
+When several unrelated projects exist, the error lists them instead of silently choosing one;
+`list_projects` remains available for explicit selection.
 `include_source` adds exact bounded source for the most relevant callables so the caller does not
 need a second snippet/read round trip. `max_output_tokens` is a hard limit with whole-row
 truncation and explicit omitted counts.
@@ -327,7 +330,8 @@ Go/Java modules are directory-based.
 
 The index stores a compressed per-file extraction cache (MessagePack + zstd). On re-index:
 
-- unchanged files are **not read or parsed** (mtime/size + SHA-256 short-circuit);
+- unchanged files are **not parsed**; discovery still reads their bytes and recomputes SHA-256, so a
+  same-size edit with a preserved timestamp cannot be hidden by metadata reuse;
 - the changed file is re-extracted, reusing per-symbol bodies whose hash did not change;
 - only the changed files, module siblings, files referencing a changed symbol name, and reverse
   dependencies are re-resolved — with the complete project symbol registry;
@@ -435,6 +439,7 @@ and release process.
 | [docs/CAPABILITIES.md](docs/CAPABILITIES.md) | Feature coverage, supported languages, explicit limits |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Measured performance, workloads, and methodology |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Build, test, verification, and release workflow |
+| [docs/audit/](docs/audit/) | Production-readiness audit, remediation, retrieval, performance, and interoperability reports |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [THIRD_PARTY.md](THIRD_PARTY.md) | Third-party licenses and attribution |
 

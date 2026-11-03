@@ -2,11 +2,50 @@
 
 ## Unreleased
 
+### Fixed
+
+- Source-reading tools no longer report a missing, moved or unreadable project root as a verified
+  empty result. `search_code` errors when the root is unavailable and reports unreadable files plus
+  a `complete` flag; full `get_code_snippet` errors when the source or recorded range is
+  unavailable. Outline mode remains graph-only.
+- `check_index_coverage` no longer reports a recorded-but-deleted file as `indexed/fresh`. It
+  distinguishes `unavailable` (missing root), `missing_on_disk`, `stale`, `indexed`, `skipped` and
+  `missing`; `index_status` exposes `root_available`, `source_available` and a warning.
+- Incremental discovery always recomputes SHA-256 from the bytes it already reads. A same-size edit
+  with a preserved timestamp can no longer be hidden by mtime/size reuse.
+- Extractor-version gating is per project (`extractor_version:<project>`). A project indexed by an
+  older extractor can no longer take the delta path after another project is rebuilt. Existing
+  databases rebuild each project once; no schema migration is required.
+- `search_graph` with a BM25 `query` now rejects structural-only filters (`name_pattern`,
+  `qn_pattern`, `relationship`, degree, entry-point, `include_connected`) instead of silently
+  ignoring them.
+- `search_code` accepts `query` as a documented alias for `pattern`, and reports the true per-file
+  `match_count` alongside the returned page size.
+- MCP project resolution now handles descendant directories, ignores a deleted remembered project,
+  rejects an ambiguous shared root, and names indexed projects plus recovery steps when no project
+  matches.
+- `delete_project`, `manage_adr` and `ingest_traces` require an explicit project instead of
+  defaulting a write or destructive operation to the workspace project.
+- Ambiguous `get_code_snippet` names return candidate qualified names instead of “symbol not found”.
+- The project lock file is no longer unlinked on release, removing an inode race that could allow
+  two concurrent indexes.
+
+### Changed
+
+- Removed a redundant pre-publication orphan scan. Delta publication already reconciles deleted and
+  newly ignored files inside its transaction. On the 10k synthetic Go fixture this reduced
+  unchanged re-index p50 from 349 ms to 229 ms and one-file edit p50 from 409 ms to 270 ms.
+- Discovery always hashes content; README/ARCHITECTURE/CAPABILITIES now describe the exact behavior
+  instead of the mtime/size SHA shortcut.
+- CLI `gry search` accepts a structural-only query when `--name-pattern` or `--qn-pattern` is given.
+
 ### Added
 
 - OMP (`omp`) as an install target. `gry install --client omp` and `--client auto`
   write `~/.omp/agent/mcp.json`, `--client all` includes it, and the agent skill
   is installed to `~/.omp/agent/skills/gry/SKILL.md` when OMP is present.
+- Production-readiness audit, remediation, retrieval, performance and agent-interoperability
+  reports under `docs/audit/`.
 
 ## 1.0.2 — 2026-10-26
 

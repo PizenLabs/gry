@@ -288,6 +288,66 @@ fn errors_and_prompts() {
 }
 
 #[test]
+fn search_code_accepts_the_documented_query_alias() {
+    let dir = fixture();
+    let root = dir.path().join("repo");
+    let mut srv = server(&dir);
+    call(
+        &mut srv,
+        "index_repository",
+        json!({"repo_path": root.to_string_lossy()}),
+    );
+    let by_pattern = call(
+        &mut srv,
+        "search_code",
+        json!({"project":"repo","pattern":"Parser","mode":"compact"}),
+    );
+    let alias = call(
+        &mut srv,
+        "search_code",
+        json!({"project":"repo","query":"Parser","mode":"compact"}),
+    );
+    assert_eq!(by_pattern["total_matches"], alias["total_matches"]);
+    assert!(!alias["results"].as_array().unwrap().is_empty());
+
+    let conflict = srv
+        .handle_message(json!({
+            "jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"search_code","arguments":{"project":"repo","pattern":"Parser","query":"Engine"}}
+        }))
+        .unwrap();
+    assert_eq!(conflict["result"]["isError"], true);
+    let text = conflict["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("both supplied"), "{text}");
+}
+
+#[test]
+fn unknown_project_errors_name_the_indexed_projects() {
+    let dir = fixture();
+    let root = dir.path().join("repo");
+    let mut srv = server(&dir);
+    call(
+        &mut srv,
+        "index_repository",
+        json!({"repo_path": root.to_string_lossy()}),
+    );
+    let response = srv
+        .handle_message(json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"search_graph","arguments":{"project":"nope","query":"parse"}}
+        }))
+        .unwrap();
+    assert_eq!(response["result"]["isError"], true);
+    let text = response["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("project not found or not indexed: nope"),
+        "{text}"
+    );
+    assert!(text.contains("Indexed projects:"), "{text}");
+    assert!(text.contains("repo"), "{text}");
+}
+
+#[test]
 fn read_only_tools_accept_an_omitted_project_and_context_exposes_source() {
     let tools = gry_mcp::tools::tools();
     let optional_project = [

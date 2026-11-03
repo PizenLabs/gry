@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,6 +38,14 @@ macro_rules! phase {
 // existing graphs cannot represent. A mismatch forces a clean rebuild instead
 // of a delta that would preserve stale edges.
 pub const EXTRACTOR_VERSION: &str = "36";
+
+/// Extraction semantics are cached per project. A global marker would let a
+/// project indexed by an older extractor take the delta path after a different
+/// project was rebuilt with a newer one, preserving edges the new semantics no
+/// longer produce.
+pub fn extractor_meta_key(project: &str) -> String {
+    format!("extractor_version:{project}")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexRequest {
@@ -171,22 +178,12 @@ impl Indexer {
             max_file_bytes: 64 * 1024 * 1024,
         };
         let t = Instant::now();
-        let discovery = discover(&root, &discover_options, &known_hashes, &cancel)?;
+        let discovery = discover(&root, &discover_options, &cancel)?;
         phase!("discovery", t);
-        // Reconcile nodes for files that are no longer part of the project
-        // (deleted, newly ignored, or left by an earlier generation). This
-        // must run before the unchanged fast path, which would otherwise keep
-        // a polluted graph forever.
-        if existing.is_some() {
-            let t_prune = Instant::now();
-            let pruned = store.prune_orphan_nodes(&project)?;
-            if pruned > 0 {
-                phase!("prune_orphans", t_prune);
-                if timing_enabled() {
-                    eprintln!("[gry] pruned {pruned} orphan file paths");
-                }
-            }
-        }
+        // Files that disappear are reconciled inside the delta publication
+        // transaction. Doing a separate prune before the limit check would
+        // mutate the last valid generation even when this run is rejected, and
+        // it duplicated work that `publish` already performs for every delta.
         if cancel.load(Ordering::Relaxed) {
             return Err(gry_core::GryError::Cancelled);
         }
@@ -219,7 +216,7 @@ impl Indexer {
             .map(|p| p.mode != mode.as_str())
             .unwrap_or(true);
         let extractor_ok =
-            store.get_meta("extractor_version")?.as_deref() == Some(EXTRACTOR_VERSION);
+            store.get_meta(&extractor_meta_key(&project))?.as_deref() == Some(EXTRACTOR_VERSION);
         if let Some(existing) = &existing {
             if changed.is_empty()
                 && deleted.is_empty()
@@ -581,6 +578,7 @@ impl Indexer {
         let t = Instant::now();
         let stats = store.publish(&write)?;
         phase!("publish", t);
+        store.set_meta(&extractor_meta_key(&project), EXTRACTOR_VERSION)?;
         store.set_meta("extractor_version", EXTRACTOR_VERSION)?;
         store.checkpoint()?;
 
@@ -698,7 +696,6 @@ pub(crate) fn decode_cache(data: &[u8]) -> Option<FileExtract> {
 
 pub struct ProjectLock {
     file: std::fs::File,
-    path: PathBuf,
 }
 
 impl ProjectLock {
@@ -715,7 +712,7 @@ impl ProjectLock {
             .open(&path)?;
         use fs2::FileExt;
         match file.try_lock_exclusive() {
-            Ok(()) => Ok(Self { file, path }),
+            Ok(()) => Ok(Self { file }),
             Err(_) => Err(gry_core::GryError::Busy(format!(
                 "another indexing run holds the lock for {project}"
             ))),
@@ -725,8 +722,11 @@ impl ProjectLock {
 
 impl Drop for ProjectLock {
     fn drop(&mut self) {
+        // Never unlink the lock file. Unlinking a locked file creates a race:
+        // a second process can open the old inode and acquire its lock while a
+        // third process creates a new inode at the same path and acquires a
+        // separate lock, allowing two indexes to publish concurrently.
         let _ = fs2::FileExt::unlock(&self.file);
-        let _ = std::fs::remove_file(&self.path);
     }
 }
 

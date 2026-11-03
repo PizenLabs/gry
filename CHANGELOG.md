@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Added
+
+- `gry update` now installs the latest stable GitHub release instead of printing
+  manual instructions. It resolves the latest tag from the public release
+  redirect (with the GitHub API as a fallback), verifies the release archive
+  against `SHA256SUMS`, extracts only the `gry` binary, and replaces the running
+  executable with an atomic rename on Unix (rename-aside on Windows). `--check`,
+  `--version`, `--dry-run`, `--force` and `--insecure` are supported.
+  Homebrew, Nix, Scoop and Chocolatey installs are refused by default so the
+  package manager stays in control. No update service, account, or telemetry is
+  involved; downloads use the system `curl`/`wget`/PowerShell.
+
+## 1.0.4 — 2026-11-03
+
 ### Fixed
 
 - Source-reading tools no longer report a missing, moved or unreadable project root as a verified

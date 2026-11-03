@@ -2,7 +2,7 @@
 
 gry is licensed under the Apache License 2.0 (see `LICENSE` and `NOTICE`). It depends on open-source
 Rust crates and redistributes the Apache-2.0 Nomic token vectors. All direct Rust dependencies report
-OSI-approved licenses; `cargo metadata` reports no `UNKNOWN` license among the 273 resolved packages.
+OSI-approved licenses; `cargo metadata` reports no `UNKNOWN` license among the 283 resolved packages.
 
 ## Nomic token vectors — Apache-2.0
 
@@ -25,6 +25,12 @@ run the upstream 7B model.
 
 `rusqlite` is MIT. The bundled SQLite library is public domain
 (<https://www.sqlite.org/copyright.html>). FTS5 is part of SQLite.
+
+## Self-update archive handling
+
+`gry update` uses `flate2` (MIT/Apache-2.0), `tar` (MIT/Apache-2.0) and `semver`
+(MIT/Apache-2.0) to verify and extract release archives and compare versions.
+`tar` uses `filetime` (MIT/Apache-2.0) for archive metadata.
 
 ## Tree-sitter and grammars
 

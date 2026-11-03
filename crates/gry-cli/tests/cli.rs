@@ -1070,3 +1070,70 @@ fn install_refuses_malformed_structural_configuration() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("not valid TOML"));
 }
+
+#[test]
+fn update_reports_plan_without_changing_the_binary() {
+    let current = env!("CARGO_PKG_VERSION");
+    let output = Command::new(bin())
+        .args(["--json", "update", "--version", current])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["status"], "up_to_date");
+    assert_eq!(value["current"], current);
+
+    let output = Command::new(bin())
+        .args(["--json", "update", "--dry-run", "--version", "v9.9.9"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["status"], "would_update");
+    assert_eq!(value["to"], "9.9.9");
+    assert_eq!(value["verified"], false);
+    assert_eq!(value["dry_run"], true);
+}
+
+#[test]
+fn update_check_reads_release_metadata() {
+    // `--check` is the only part that needs a network client. Use a local
+    // file:// payload and skip on hosts without curl. Windows uses a
+    // different file URL shape and is covered by the unit tests.
+    if cfg!(windows) || Command::new("curl").arg("--version").output().is_err() {
+        return;
+    }
+    // The generated metadata is ASCII, so the test is meaningful anywhere
+    // with curl.
+    let dir = tempfile::tempdir().unwrap();
+    let api = dir.path().join("latest.json");
+    fs::write(&api, r#"{"tag_name":"v9.9.9"}"#).unwrap();
+    let url = api
+        .to_str()
+        .map(|path| format!("file://{path}"))
+        .unwrap_or_default();
+    let output = Command::new(bin())
+        .env("GRY_UPDATE_API_URL", url)
+        .args(["--json", "update", "--check"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["status"], "update_available");
+    assert_eq!(value["current"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(value["latest"], "9.9.9");
+    assert_eq!(value["update_available"], true);
+    assert!(value["asset"].as_str().unwrap().starts_with("gry-"));
+}

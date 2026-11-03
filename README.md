@@ -55,7 +55,8 @@ database.
   manifests, Dockerfiles, Kubernetes, Helm, Kustomize, Terraform, CI, and runtime observations live
   in one model.
 - **Local and self-contained.** A single binary, bundled SQLite, statically linked grammars, and
-  static token vectors. No network access at runtime.
+  static token vectors. Indexing and querying never touch the network; only the explicit
+  `gry update` command downloads a release.
 - **Fast incremental indexing.** Unchanged files are not read or parsed. A one-file edit on a
   10,000-file repository lands in about 233 ms p50; a full index of the same workload runs at about
   2,800 files/s.
@@ -70,7 +71,7 @@ database.
 | **Storage** | Local SQLite; no hosted service and no mandatory daemon |
 | **Languages** | 68 statically linked tree-sitter grammars plus a conservative lexical fallback |
 | **Scope** | Code, tests, docs, config, packages, infrastructure, and runtime traces |
-| **Privacy** | No network access, API keys, or telemetry at runtime |
+| **Privacy** | No telemetry or API keys; only explicit `gry update` uses the network |
 | **Platforms** | macOS and Linux (CI-tested) |
 
 ## Installation
@@ -155,6 +156,27 @@ make install
 
 Prebuilt binaries for macOS (arm64/x86_64) and Linux (glibc/musl, x86_64/aarch64)
 are published with each release. Verify any install with `gry doctor`.
+
+### Updating
+
+`gry update` reads the latest stable release from the public GitHub Releases page,
+verifies the archive against the published `SHA256SUMS`, and replaces the running
+binary with a single atomic rename. There is no update service, account, or
+telemetry; downloads use the system `curl`, `wget`, or PowerShell.
+
+```bash
+gry update                      # install the latest stable release
+gry update --check              # report only
+gry update --version v1.0.4     # pin or downgrade a specific release
+gry update --dry-run            # show the asset and path without changing anything
+```
+
+Installs owned by a package manager (Homebrew, Nix, Scoop, Chocolatey) are refused
+with the matching upgrade command; `--force` overrides that check. Use the package
+manager or `cargo install gry --locked --force` for those installs. Checksum
+verification is on by default and can only be disabled explicitly with `--insecure`.
+Because the binary is replaced at the same path, MCP client entries and installed
+hooks keep working without reconfiguration.
 
 ## Quick start
 

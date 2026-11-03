@@ -178,8 +178,16 @@ The check is skipped with a clear message when the reference binary is not insta
    `publish-crates` job. Set the `CARGO_REGISTRY_TOKEN` repository secret once
    before the first release (see [crates.io publishing](#cratesio-publishing)).
 
-`gry update` is intentionally not implemented: installs are managed by the installer, package
-manager, or by rebuilding from source.
+`gry update` is implemented in `crates/gry-cli/src/update.rs`. It uses the public
+GitHub Releases assets (`releases/latest` plus the release redirect, with the public
+API as a fallback), verifies the downloaded archive against `SHA256SUMS`, extracts
+only the expected binary, and replaces the running executable with an atomic rename
+on Unix (rename-aside on Windows). It never contacts a hosted update service and
+does not run during indexing, querying, or MCP serving. Package-manager installs are
+detected and refused unless `--force` is passed. `--check`, `--version`, `--dry-run`
+and `--insecure` cover reporting, pinning, previewing and the explicit opt-out of
+checksum verification. `GRY_REPO`, `GRY_RELEASES_URL`, `GRY_UPDATE_API_URL` and
+`GRY_VERSION` extend the installer's override environment.
 
 ## crates.io publishing
 

@@ -14,6 +14,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod update;
+
 static JSON_OUTPUT: AtomicBool = AtomicBool::new(false);
 static QUIET_OUTPUT: AtomicBool = AtomicBool::new(false);
 
@@ -115,8 +117,8 @@ enum Command {
     },
     /// Print or install an agent skill.
     Skill(SkillCmd),
-    /// Show how to update this installation.
-    Update,
+    /// Update gry to the latest stable release.
+    Update(UpdateCmd),
     /// Check cache, database, FTS and build health.
     Doctor,
     #[command(name = "__index-worker", hide = true)]
@@ -485,6 +487,25 @@ struct SkillCmd {
 }
 
 #[derive(Args)]
+struct UpdateCmd {
+    /// Report the latest release without installing it.
+    #[arg(long)]
+    check: bool,
+    /// Install a specific release tag instead of the latest.
+    #[arg(long, value_name = "TAG")]
+    version: Option<String>,
+    /// Reinstall even when the version already matches.
+    #[arg(long)]
+    force: bool,
+    /// Show the update plan without downloading or replacing the binary.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+    /// Skip SHA-256 verification (not recommended).
+    #[arg(long)]
+    insecure: bool,
+}
+
+#[derive(Args)]
 struct WorkerCmd {
     #[arg(long)]
     repo: String,
@@ -819,13 +840,16 @@ fn run(cli: &Cli, config: &Config) -> gry_core::GryResult<()> {
         Command::Integrations { verify } => integrations_cmd(*verify),
         Command::Skill(cmd) => skill_cmd(cmd),
         Command::Doctor => doctor_cmd(config),
-        Command::Update => {
-            print_value(&json!({
-                "version": env!("CARGO_PKG_VERSION"),
-                "status": "manual_update",
-                "message": "gry does not self-update. Re-run the installer or rebuild from source.",
-                "command": "curl -fsSL https://github.com/PizenLabs/gry/releases/latest/download/install.sh | bash"
-            }));
+        Command::Update(cmd) => {
+            let report = update::run(&update::UpdateOptions {
+                check: cmd.check,
+                version: cmd.version.clone(),
+                force: cmd.force,
+                dry_run: cmd.dry_run,
+                insecure: cmd.insecure,
+                quiet: QUIET_OUTPUT.load(Ordering::Relaxed),
+            })?;
+            print_value(&report);
             Ok(())
         }
         Command::IndexWorker(cmd) => worker_cmd(config, cmd),

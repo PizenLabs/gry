@@ -179,8 +179,9 @@ full list of node labels, edge types and the language set is in the [README](../
 First-class commands exist for
 `index`/`status`/`projects`/`delete`/`search`/`trace`/`snippet`/`outline`/`schema`/`query`/
 `architecture`/`coverage`/`changes`/`context`/`hook`/`adr`/`traces`/`compare`/`serve`/`cli`/`watch`/`test-impact`/
-`config`/`install`/`uninstall`/`skill`. `gry install` supports a curated client set; `update` is not
-implemented (use the package manager or rebuild). `gry version` is provided by clap.
+`config`/`install`/`uninstall`/`skill`/`update`. `gry install` supports a curated client set;
+`gry update` installs the latest stable GitHub release after checking `SHA256SUMS` and refuses
+package-manager-owned binaries unless forced. `gry version` is provided by clap.
 
 ## Known limits
 

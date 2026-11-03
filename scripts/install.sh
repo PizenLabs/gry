@@ -813,6 +813,7 @@ fi
 
 say ""
 say "${C_BOLD}gry is ready.${C_RESET}"
+say "Update later with: gry update"
 if [ "$CLIENT" = "none" ]; then
   say "MCP configuration was skipped. Configure a harness with:"
   say "  gry install --client auto"

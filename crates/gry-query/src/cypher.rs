@@ -1143,7 +1143,7 @@ fn split_union(query: &str) -> gry_core::GryResult<Vec<UnionPart>> {
             Tok::Punct(')') | Tok::Punct(']') | Tok::Punct('}') => depth -= 1,
             Tok::Ident(id) if depth == 0 && id.eq_ignore_ascii_case("UNION") => {
                 // Reconstruct the source slice for this part.
-                let part_text = slice_tokens(query, &toks, start, i);
+                let part_text = slice_tokens(&toks, start, i);
                 parts.push(UnionPart {
                     query: part_text,
                     all,
@@ -1164,7 +1164,7 @@ fn split_union(query: &str) -> gry_core::GryResult<Vec<UnionPart>> {
         }
         i += 1;
     }
-    let part_text = slice_tokens(query, &toks, start, toks.len());
+    let part_text = slice_tokens(&toks, start, toks.len());
     if !part_text.trim().is_empty() {
         parts.push(UnionPart {
             query: part_text,
@@ -1177,7 +1177,7 @@ fn split_union(query: &str) -> gry_core::GryResult<Vec<UnionPart>> {
     Ok(parts)
 }
 
-fn slice_tokens(source: &str, toks: &[Tok], start: usize, end: usize) -> String {
+fn slice_tokens(toks: &[Tok], start: usize, end: usize) -> String {
     // Token positions are not retained; rebuild from token text. This loses
     // original whitespace but preserves semantics.
     let mut out = String::new();
@@ -1192,7 +1192,6 @@ fn slice_tokens(source: &str, toks: &[Tok], start: usize, end: usize) -> String 
         out.push_str(&piece);
         out.push(' ');
     }
-    let _ = source;
     out
 }
 

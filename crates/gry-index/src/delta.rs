@@ -581,6 +581,10 @@ pub fn try_incremental(ctx: DeltaContext<'_>) -> gry_core::GryResult<Option<Inde
         );
     }
     let (total_nodes, total_edges) = ctx.store.counts(ctx.project)?;
+    ctx.store.set_meta(
+        &crate::pipeline::extractor_meta_key(ctx.project),
+        EXTRACTOR_VERSION,
+    )?;
     ctx.store.set_meta("extractor_version", EXTRACTOR_VERSION)?;
     ctx.store.checkpoint_passive()?;
 

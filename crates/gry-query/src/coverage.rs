@@ -18,6 +18,7 @@ pub fn check_index_coverage(
 ) -> gry_core::GryResult<Value> {
     let record = store.require_project(project)?;
     let root = Path::new(&record.root_path);
+    let root_available = root.is_dir();
     let hashes: std::collections::HashMap<String, gry_core::types::FileHash> = store
         .file_hashes(project)?
         .into_iter()
@@ -34,8 +35,12 @@ pub fn check_index_coverage(
         let normalized = path.trim_start_matches("./").trim_start_matches('/');
         let hash = hashes.get(normalized);
         let file_path = root.join(normalized);
-        let metadata = std::fs::metadata(&file_path).ok();
-        let stale = match (hash, metadata) {
+        let metadata = if root_available {
+            std::fs::metadata(&file_path).ok()
+        } else {
+            None
+        };
+        let stale = match (hash, &metadata) {
             (Some(hash), Some(meta)) => {
                 let mtime = meta
                     .modified()
@@ -45,11 +50,17 @@ pub fn check_index_coverage(
                     .unwrap_or(0);
                 mtime != hash.mtime_ns || meta.len() as i64 != hash.size
             }
-            _ => false,
+            // A file recorded in the index but absent from the filesystem is
+            // not fresh. Without this branch a moved repository (or a deleted
+            // file) reports status=indexed and fresh=true.
+            (Some(_), None) => true,
+            (None, _) => false,
         };
         let (status, reason): (&str, &str) = match (hash, coverage_map.get(normalized)) {
             (_, Some(kind)) if *kind == "parse_partial" => ("partial", "parse_partial"),
             (_, Some(kind)) if *kind == "parse_unusable" => ("partial", "parse_unusable"),
+            (Some(_), _) if !root_available => ("unavailable", "root_missing"),
+            (Some(_), _) if metadata.is_none() => ("missing_on_disk", "recorded_but_missing"),
             (Some(_), _) if stale => ("stale", "file_changed_since_index"),
             (Some(_), _) => ("indexed", "ok"),
             (None, Some(kind)) => ("skipped", *kind),
@@ -61,7 +72,7 @@ pub fn check_index_coverage(
             "status": status,
             "reason": reason,
             "nodes": nodes,
-            "fresh": !stale,
+            "fresh": hash.is_some() && metadata.is_some() && !stale,
         }));
     }
     let path_total = path_rows.len();
@@ -101,7 +112,15 @@ pub fn check_index_coverage(
             "files": indexed,
             "parse_partial": partial,
             "skipped": skipped,
-            "status": if indexed == 0 { "unindexed" } else if partial > 0 || skipped > 0 { "partial" } else { "clean" },
+            "status": if !root_available {
+                "unavailable"
+            } else if indexed == 0 {
+                "unindexed"
+            } else if partial > 0 || skipped > 0 {
+                "partial"
+            } else {
+                "clean"
+            },
         }));
     }
     let scope_total = scope_rows.len();
@@ -114,6 +133,8 @@ pub fn check_index_coverage(
     let mut out = json!({
         "project": project,
         "generation": record.generation,
+        "root_path": record.root_path,
+        "root_available": root_available,
         "paths": path_page,
         "path_total": path_total,
         "path_offset": path_offset,
@@ -137,6 +158,7 @@ pub fn index_status(
     diagnostics: &str,
 ) -> gry_core::GryResult<Value> {
     let record = store.require_project(project)?;
+    let root_available = Path::new(&record.root_path).is_dir();
     let (nodes, edges) = store.counts(project)?;
     let coverage = store.coverage(project)?;
     let coverage_meta = store.coverage_meta(project)?;
@@ -154,6 +176,9 @@ pub fn index_status(
         "project": project,
         "indexed": true,
         "root_path": record.root_path,
+        "root_available": root_available,
+        "source_available": root_available,
+        "availability": if root_available { "available" } else { "root_missing" },
         "generation": record.generation,
         "indexed_at": record.indexed_at,
         "mode": record.mode,
@@ -176,6 +201,11 @@ pub fn index_status(
         "labels": labels.iter().map(|(l,n)| json!({"label":l,"count":n})).collect::<Vec<_>>(),
         "edge_types": edges_types.iter().map(|(t,n)| json!({"type":t,"count":n})).collect::<Vec<_>>(),
     });
+    if !root_available {
+        out["warning"] = json!(
+            "the indexed project root is missing or unreadable; graph data is available but source text, coverage freshness and change detection are not. Re-index at the current path."
+        );
+    }
     if diagnostics != "none" {
         let sample = if diagnostics == "summary" { 5 } else { 500 };
         out["coverage"]["rows"] = json!(coverage.iter().take(sample).collect::<Vec<_>>());
@@ -207,8 +237,28 @@ mod tests {
 
     #[test]
     fn coverage_reports_missing_and_indexed() {
-        let store = test_store();
-        // test_store has no real root; use a path with no FS metadata.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn parse() {}\n").unwrap();
+        let metadata = std::fs::metadata(root.join("src/lib.rs")).unwrap();
+        let mtime_ns = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i64;
+        let files = vec![gry_core::types::FileHash {
+            rel_path: "src/lib.rs".to_string(),
+            sha256: "a".to_string(),
+            mtime_ns,
+            size: metadata.len() as i64,
+        }];
+        let mut store = Store::open_in_memory().unwrap();
+        let mut write = gry_store::ProjectWrite::new("p", root.to_str().unwrap(), "full", "gen-1");
+        write.files = &files;
+        store.publish(&write).unwrap();
+
         let out = check_index_coverage(
             &store,
             "p",
@@ -223,8 +273,51 @@ mod tests {
         .unwrap();
         let rows = out["paths"].as_array().unwrap();
         assert_eq!(rows[0]["status"], "indexed");
+        assert_eq!(rows[0]["fresh"], true);
         assert_eq!(rows[1]["status"], "missing");
-        assert_eq!(out["scopes"][0]["files"], 2);
+        assert_eq!(rows[1]["fresh"], false);
+        assert_eq!(out["scopes"][0]["files"], 1);
+
+        // Deleting a recorded file must not leave a verified-fresh row.
+        std::fs::remove_file(root.join("src/lib.rs")).unwrap();
+        let out = check_index_coverage(
+            &store,
+            "p",
+            &["src/lib.rs".to_string()],
+            &[],
+            20,
+            0,
+            20,
+            0,
+            "none",
+        )
+        .unwrap();
+        assert_eq!(out["paths"][0]["status"], "missing_on_disk");
+        assert_eq!(out["paths"][0]["fresh"], false);
+
+        // A missing repository root is unavailable, not an indexed empty file.
+        std::fs::remove_dir_all(root).unwrap();
+        let out = check_index_coverage(
+            &store,
+            "p",
+            &["src/lib.rs".to_string()],
+            &[],
+            20,
+            0,
+            20,
+            0,
+            "none",
+        )
+        .unwrap();
+        assert_eq!(out["root_available"], false);
+        assert_eq!(out["paths"][0]["status"], "unavailable");
+        assert_eq!(out["paths"][0]["fresh"], false);
+
+        let status = index_status(&store, "p", false, "none").unwrap();
+        assert_eq!(status["root_available"], false);
+        assert_eq!(status["source_available"], false);
+        assert_eq!(status["availability"], "root_missing");
+        assert!(status["warning"].is_string());
     }
 
     #[test]

@@ -223,6 +223,196 @@ fn main() { let mut s = Service { count: 0 }; s.handle(); }
 }
 
 #[test]
+fn a_stale_per_project_extractor_forces_a_rebuild() {
+    let dir = fixture();
+    let root = dir.path().join("repo");
+    let cfg = config(dir.path());
+    let indexer = Indexer::new(cfg.clone());
+    let first = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    {
+        let store = Store::open(&cfg.db_path).unwrap();
+        store
+            .set_meta(
+                &gry_index::pipeline::extractor_meta_key(&first.project),
+                "0",
+            )
+            .unwrap();
+    }
+    let second = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    assert!(!second.unchanged);
+    assert_eq!(
+        second.parsed_files, second.files,
+        "a stale extractor marker must not take the delta path"
+    );
+}
+
+fn assert_graph_invariants(store: &Store, project: &str) {
+    let conn = store.connection();
+    let dangling: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM edges e
+             LEFT JOIN nodes s ON s.id=e.source_id
+             LEFT JOIN nodes t ON t.id=e.target_id
+             WHERE e.project=?1 AND (s.id IS NULL OR t.id IS NULL)",
+            [project],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dangling, 0, "dangling edge endpoints");
+
+    let cross_project: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM edges e
+             JOIN nodes s ON s.id=e.source_id
+             JOIN nodes t ON t.id=e.target_id
+             WHERE e.project=?1 AND (s.project<>e.project OR t.project<>e.project)",
+            [project],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cross_project, 0, "edges crossing project boundaries");
+
+    let invalid_range: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM nodes WHERE project=?1
+             AND (start_line<0 OR (end_line<>0 AND end_line<start_line))",
+            [project],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(invalid_range, 0, "invalid source ranges");
+
+    let empty_identity: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM nodes WHERE project=?1
+             AND (name='' OR qualified_name='' OR label='')",
+            [project],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(empty_identity, 0, "empty node identity");
+
+    let duplicate_qn: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT qualified_name FROM nodes WHERE project=?1
+                GROUP BY qualified_name HAVING COUNT(*)>1)",
+            [project],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(duplicate_qn, 0, "duplicate qualified names");
+
+    let unowned: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM nodes n WHERE n.project=?1 AND n.file_path<>''
+             AND NOT EXISTS (
+                SELECT 1 FROM file_hashes f
+                WHERE f.project=n.project AND f.rel_path=n.file_path)",
+            [project],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unowned, 0, "file-owned nodes without a file record");
+}
+
+#[test]
+fn newly_ignored_files_are_removed_by_delta_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    write(&root, "src/keep.rs", "fn keep() {}\n");
+    write(&root, "src/drop.rs", "fn drop_me() {}\n");
+    let cfg = config(dir.path());
+    let indexer = Indexer::new(cfg.clone());
+    let first = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    assert!(!Store::open(&cfg.db_path)
+        .unwrap()
+        .nodes_by_file(&first.project, "src/drop.rs")
+        .unwrap()
+        .is_empty());
+    write(&root, ".gryignore", "src/drop.rs\n");
+    let second = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    assert_eq!(second.deleted_files, 1);
+    let store = Store::open(&cfg.db_path).unwrap();
+    assert!(store
+        .nodes_by_file(&second.project, "src/drop.rs")
+        .unwrap()
+        .is_empty());
+    assert!(!store
+        .nodes_by_file(&second.project, "src/keep.rs")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn graph_invariants_hold_after_incremental_updates() {
+    let dir = fixture();
+    let root = dir.path().join("repo");
+    let cfg = config(dir.path());
+    let indexer = Indexer::new(cfg.clone());
+    let first = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    {
+        let store = Store::open(&cfg.db_path).unwrap();
+        assert_graph_invariants(&store, &first.project);
+    }
+
+    write(
+        &root,
+        "src/lib.rs",
+        "pub struct Service { count: usize }\nimpl Service {\n    pub fn handle(&mut self) -> usize { 1 }\n}\nfn main() { let mut s = Service { count: 0 }; s.handle(); }\n",
+    );
+    std::fs::remove_file(root.join("app/model.py")).unwrap();
+    let second = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    let store = Store::open(&cfg.db_path).unwrap();
+    assert_graph_invariants(&store, &second.project);
+}
+
+#[test]
+fn same_size_edit_with_preserved_mtime_is_not_treated_as_unchanged() {
+    use std::fs::FileTimes;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    write(&root, "src/lib.rs", "fn a() {}\n");
+    let indexer = Indexer::new(config(dir.path()));
+    let first = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    let path = root.join("src/lib.rs");
+    let old_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+    fs::write(&path, "fn b() {}\n").unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(old_mtime))
+        .unwrap();
+
+    let second = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    assert!(
+        !second.unchanged,
+        "same-size edit was hidden by mtime reuse"
+    );
+    assert_eq!(second.parsed_files, 1);
+    assert_ne!(second.generation, first.generation);
+}
+
+#[test]
 fn filtered_and_fast_modes() {
     let dir = fixture();
     let root = dir.path().join("repo");

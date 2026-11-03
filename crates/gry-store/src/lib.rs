@@ -298,6 +298,30 @@ impl Store {
         }
     }
 
+    /// Indexed projects whose root contains `path`, deepest root first.
+    ///
+    /// Resolution is based on canonical paths when the filesystem still has
+    /// them. A moved or deleted repository therefore produces no match instead
+    /// of silently borrowing another project's evidence.
+    pub fn projects_containing_path(&self, path: &Path) -> StoreResult<Vec<Project>> {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut matches: Vec<(usize, Project)> = Vec::new();
+        for project in self.projects()? {
+            let root = PathBuf::from(&project.root_path);
+            let root = std::fs::canonicalize(&root).unwrap_or(root);
+            if path.starts_with(&root) {
+                matches.push((root.components().count(), project));
+            }
+        }
+        matches.sort_by(|(depth_a, a), (depth_b, b)| {
+            depth_b
+                .cmp(depth_a)
+                .then_with(|| b.indexed_at.cmp(&a.indexed_at))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(matches.into_iter().map(|(_, project)| project).collect())
+    }
+
     pub fn list_projects(
         &self,
         limit: usize,
@@ -863,7 +887,7 @@ impl Store {
             )?;
             phase!("gc");
             if !write.nodes_only {
-                recompute_importance(&tx, write.project, &delta_touched)?;
+                recompute_importance(&tx, &delta_touched)?;
             }
             phase!("importance");
         }
@@ -1424,10 +1448,6 @@ impl Store {
 
     pub fn adr_put(&self, project: &str, content: &str) -> StoreResult<()> {
         let now = now_iso();
-        let hash = gry_core::config::resolve_cache_dir()
-            .to_string_lossy()
-            .to_string();
-        let _ = hash;
         let digest = sha256_hex(content.as_bytes());
         self.conn.execute(
             "INSERT INTO project_summaries(project,summary,source_hash,created_at,updated_at)
@@ -1901,11 +1921,7 @@ fn gc_delta(
     Ok(())
 }
 
-fn recompute_importance(
-    tx: &Transaction<'_>,
-    project: &str,
-    touched: &HashSet<i64>,
-) -> StoreResult<()> {
+fn recompute_importance(tx: &Transaction<'_>, touched: &HashSet<i64>) -> StoreResult<()> {
     let types = "'CALLS','USAGE','CALL_REFERENCE','INHERITS','IMPLEMENTS','HTTP_CALLS'";
     let mut ids: Vec<i64> = touched.iter().copied().collect();
     ids.sort_unstable();
@@ -1929,7 +1945,6 @@ fn recompute_importance(
             remove.execute([id])?;
         }
     }
-    let _ = project;
     Ok(())
 }
 
@@ -2120,6 +2135,29 @@ fn choose_ranked_node(mut nodes: Vec<Node>) -> Option<Node> {
 mod tests {
     use super::*;
     use crate::test_support::test_store;
+
+    #[test]
+    fn projects_containing_path_returns_deepest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("repo");
+        let inner = outer.join("packages/app");
+        std::fs::create_dir_all(inner.join("src")).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .upsert_project("outer", outer.to_str().unwrap())
+            .unwrap();
+        store
+            .upsert_project("inner", inner.to_str().unwrap())
+            .unwrap();
+        let found = store.projects_containing_path(&inner.join("src")).unwrap();
+        let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["inner", "outer"]);
+        let outside = tempfile::tempdir().unwrap();
+        assert!(store
+            .projects_containing_path(outside.path())
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn delta_publish_removes_nodes_for_files_no_longer_present() {

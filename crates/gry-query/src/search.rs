@@ -39,6 +39,31 @@ pub fn search_graph(store: &Store, req: &GraphSearchRequest) -> gry_core::GryRes
     // result. Silent zeroes make an unindexed repository look like a repository
     // with no symbols.
     store.require_project(&req.project)?;
+    // BM25 already supports label/file/kind/namespace filtering. The remaining
+    // structural filters are applied by the structural search path only. Do
+    // not silently ignore them when the caller also supplies a BM25 query:
+    // returning unfiltered rows under a filtered request is worse than asking
+    // for one unambiguous call.
+    if req.query.as_deref().is_some_and(|q| !q.is_empty()) {
+        let unsupported = [
+            ("name_pattern", req.name_pattern.is_some()),
+            ("qn_pattern", req.qn_pattern.is_some()),
+            ("relationship", req.relationship.is_some()),
+            ("min_degree", req.min_degree.is_some()),
+            ("max_degree", req.max_degree.is_some()),
+            ("exclude_entry_points", req.exclude_entry_points),
+            ("include_connected", req.include_connected),
+        ]
+        .into_iter()
+        .filter_map(|(name, set)| set.then_some(name))
+        .collect::<Vec<_>>();
+        if !unsupported.is_empty() {
+            return Err(gry_core::GryError::invalid(format!(
+                "query is BM25-ranked and cannot be combined with {}; call again with only query (BM25) or only the structural filters. label, file_pattern, kind and namespace are supported with query",
+                unsupported.join(", ")
+            )));
+        }
+    }
     let mut structural = None;
     let mut total = 0i64;
     if let Some(query) = req.query.as_deref().filter(|q| !q.is_empty()) {
@@ -321,6 +346,13 @@ pub fn search_code(store: &Store, req: &SearchCodeRequest) -> gry_core::GryResul
     let started = std::time::Instant::now();
     let project = store.require_project(&req.project)?;
     let root = Path::new(&project.root_path);
+    if !root.is_dir() {
+        return Err(gry_core::GryError::invalid(format!(
+            "project root is unavailable: {} (project {}). The index is still present but source text cannot be read; re-index the repository at its current path.",
+            root.display(),
+            project.name
+        )));
+    }
     let cursor_key = format!(
         "{}\u{1f}{}\u{1f}{}\u{1f}{}",
         req.pattern,
@@ -365,6 +397,9 @@ pub fn search_code(store: &Store, req: &SearchCodeRequest) -> gry_core::GryResul
     let mut raw_rows = Vec::new();
     let mut directories: HashMap<String, usize> = HashMap::new();
     let mut total_matches = 0usize;
+    let mut scanned_files = 0usize;
+    let mut unreadable_files = 0usize;
+    let mut unreadable_samples: Vec<String> = Vec::new();
     for file in &files {
         if let Some(glob) = &file_glob {
             if !glob.compile_matcher().is_match(&file.rel_path) {
@@ -376,15 +411,22 @@ pub fn search_code(store: &Store, req: &SearchCodeRequest) -> gry_core::GryResul
                 continue;
             }
         }
+        scanned_files += 1;
         let path = root.join(&file.rel_path);
         let Ok(text) = std::fs::read_to_string(&path) else {
+            unreadable_files += 1;
+            if unreadable_samples.len() < 5 {
+                unreadable_samples.push(file.rel_path.clone());
+            }
             continue;
         };
         let mut matches = Vec::new();
+        let mut file_matches = 0usize;
         let all_lines: Vec<&str> = text.lines().collect();
         for (idx, line) in all_lines.iter().enumerate() {
             if matcher.is_match(line) {
                 total_matches += 1;
+                file_matches += 1;
                 if raw_rows.len() < req.raw_offset + req.raw_limit.max(1) {
                     raw_rows.push(json!({
                         "file": file.rel_path,
@@ -451,7 +493,8 @@ pub fn search_code(store: &Store, req: &SearchCodeRequest) -> gry_core::GryResul
         file_hits.push(json!({
             "file": file.rel_path,
             "matches": compact,
-            "match_count": matches.len(),
+            "match_count": file_matches,
+            "returned_matches": matches.len(),
             "symbols": symbols.iter()
                 .filter(|n| !matches!(n.label.as_str(), "File"|"Folder"|"Project"|"Package"))
                 .take(8)
@@ -462,6 +505,13 @@ pub fn search_code(store: &Store, req: &SearchCodeRequest) -> gry_core::GryResul
     }
     let scope_ms = scope_start.elapsed().as_millis();
     let scan_ms = started.elapsed().as_millis();
+    if scanned_files > 0 && unreadable_files == scanned_files {
+        return Err(gry_core::GryError::invalid(format!(
+            "no indexed source files could be read under {} for project {}; the repository was moved, deleted or made unreadable. Re-index before searching source text.",
+            root.display(),
+            project.name
+        )));
+    }
     let total_files = file_hits.len();
     let file_hits: Vec<Value> = if req.mode == "files" {
         file_hits
@@ -525,6 +575,10 @@ pub fn search_code(store: &Store, req: &SearchCodeRequest) -> gry_core::GryResul
         "raw": raw_page,
         "directories": dirs,
         "scope": "indexed_files",
+        "scanned_files": scanned_files,
+        "unreadable_files": unreadable_files,
+        "unreadable_samples": unreadable_samples,
+        "complete": unreadable_files == 0,
     });
     if req.debug {
         out["debug"] = json!({
@@ -552,18 +606,36 @@ pub struct SnippetRequest {
 
 pub fn get_code_snippet(store: &Store, req: &SnippetRequest) -> gry_core::GryResult<Value> {
     let project = store.require_project(&req.project)?;
-    let node = store
-        .resolve_node(&req.project, &req.qualified_name)?
-        .ok_or_else(|| {
-            gry_core::GryError::invalid(format!(
-                "symbol not found: {} (use search_graph to find its qualified name)",
-                req.qualified_name
-            ))
-        })?;
+    let node = match store.resolve_node(&req.project, &req.qualified_name)? {
+        Some(node) => node,
+        None => {
+            // A short name that is shared by several equally authoritative
+            // symbols is ambiguous, not missing. Return the candidates so the
+            // caller can retry with a qualified name instead of concluding
+            // that no such symbol exists.
+            let candidates = store.nodes_by_name(&req.project, req.qualified_name.trim())?;
+            if candidates.is_empty() {
+                return Err(gry_core::GryError::invalid(format!(
+                    "symbol not found: {} (use search_graph to find its qualified name)",
+                    req.qualified_name
+                )));
+            }
+            let names = candidates
+                .iter()
+                .take(8)
+                .map(|node| node.qualified_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(gry_core::GryError::invalid(format!(
+                "ambiguous symbol: {} matches {} indexed symbols; pass one qualified name: {}",
+                req.qualified_name,
+                candidates.len(),
+                names
+            )));
+        }
+    };
     let root = Path::new(&project.root_path);
     let path = root.join(&node.file_path);
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let lines: Vec<&str> = text.lines().collect();
     let start = req.start_line.unwrap_or(node.start_line).max(1) as usize;
     let end = node.end_line.max(start as i32) as usize;
     let mode = if req.source_mode == "auto" {
@@ -612,6 +684,31 @@ pub fn get_code_snippet(store: &Store, req: &SnippetRequest) -> gry_core::GryRes
             })),
         )
     } else {
+        if node.file_path.is_empty() {
+            return Err(gry_core::GryError::invalid(format!(
+                "symbol {} has no source location (global {} node)",
+                node.qualified_name, node.label
+            )));
+        }
+        let text = std::fs::read_to_string(&path).map_err(|error| {
+            gry_core::GryError::invalid(format!(
+                "source unavailable for {} at {}: {}. The repository may have moved or the index may be stale; re-index before relying on this symbol.",
+                node.qualified_name,
+                path.display(),
+                error
+            ))
+        })?;
+        let lines: Vec<&str> = text.lines().collect();
+        if start > lines.len() {
+            return Err(gry_core::GryError::invalid(format!(
+                "recorded source range {}-{} for {} is outside the current file ({} lines); the index is stale, re-index before relying on this symbol",
+                start,
+                end,
+                node.qualified_name,
+                lines.len()
+            )));
+        }
+        let end = end.min(lines.len());
         let max_lines = req.max_lines.unwrap_or(usize::MAX);
         let page: Vec<String> = lines
             .iter()
@@ -828,6 +925,79 @@ mod tests {
     }
 
     #[test]
+    fn query_rejects_structural_filters_instead_of_ignoring_them() {
+        let store = test_store();
+        let req = GraphSearchRequest {
+            project: "p".into(),
+            query: Some("parse".into()),
+            name_pattern: Some("^parse".into()),
+            ..Default::default()
+        };
+        let err = search_graph(&store, &req).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot be combined with name_pattern"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn source_search_reports_an_unavailable_root_instead_of_empty_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        let write = gry_store::ProjectWrite::new("q", root.to_str().unwrap(), "full", "gen-1");
+        store.publish(&write).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        let req = SearchCodeRequest {
+            project: "q".into(),
+            pattern: "anything".into(),
+            ..Default::default()
+        };
+        let err = search_code(&store, &req).unwrap_err();
+        assert!(
+            err.to_string().contains("root is unavailable"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn source_search_reports_the_true_match_count_per_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("lib.rs"), "needle\nneedle\nneedle\n").unwrap();
+        let metadata = std::fs::metadata(root.join("lib.rs")).unwrap();
+        let mtime_ns = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i64;
+        let files = vec![gry_core::types::FileHash {
+            rel_path: "lib.rs".into(),
+            sha256: "a".into(),
+            mtime_ns,
+            size: metadata.len() as i64,
+        }];
+        let mut store = Store::open_in_memory().unwrap();
+        let mut write = gry_store::ProjectWrite::new("q", root.to_str().unwrap(), "full", "gen-1");
+        write.files = &files;
+        store.publish(&write).unwrap();
+        let req = SearchCodeRequest {
+            project: "q".into(),
+            pattern: "needle".into(),
+            match_limit: 1,
+            ..Default::default()
+        };
+        let out = search_code(&store, &req).unwrap();
+        assert_eq!(out["total_matches"], 3);
+        assert_eq!(out["results"][0]["match_count"], 3);
+        assert_eq!(out["results"][0]["returned_matches"], 1);
+        assert_eq!(out["complete"], true);
+    }
+
+    #[test]
     fn snippet_outlines_large_containers() {
         let store = test_store();
         let req = SnippetRequest {
@@ -842,5 +1012,48 @@ mod tests {
         };
         let out = get_code_snippet(&store, &req).unwrap();
         assert!(out["outline"].is_object());
+    }
+
+    #[test]
+    fn snippet_reports_ambiguity_instead_of_not_found() {
+        use gry_core::types::NewNode;
+        let mut store = Store::open_in_memory().unwrap();
+        let nodes = vec![
+            NewNode::new("Method", "Run", "p.a.A.Run", "a.rs", 1, 2),
+            NewNode::new("Method", "Run", "p.b.B.Run", "b.rs", 1, 2),
+        ];
+        let mut write = gry_store::ProjectWrite::new("p", "/tmp/p", "full", "gen-1");
+        write.nodes = &nodes;
+        store.publish(&write).unwrap();
+        let req = SnippetRequest {
+            project: "p".into(),
+            qualified_name: "Run".into(),
+            include_neighbors: false,
+            source_mode: "full".into(),
+            member_limit: 10,
+            member_offset: 0,
+            start_line: None,
+            max_lines: None,
+        };
+        let err = get_code_snippet(&store, &req).unwrap_err();
+        assert!(err.to_string().contains("ambiguous symbol"), "{err}");
+        assert!(err.to_string().contains("p.a.A.Run"), "{err}");
+    }
+
+    #[test]
+    fn snippet_fails_when_source_is_unavailable() {
+        let store = test_store();
+        let req = SnippetRequest {
+            project: "p".into(),
+            qualified_name: "p.src.main.main".into(),
+            include_neighbors: false,
+            source_mode: "full".into(),
+            member_limit: 10,
+            member_offset: 0,
+            start_line: None,
+            max_lines: None,
+        };
+        let err = get_code_snippet(&store, &req).unwrap_err();
+        assert!(err.to_string().contains("source unavailable"), "{err}");
     }
 }

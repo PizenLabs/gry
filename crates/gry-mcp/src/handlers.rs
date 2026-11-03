@@ -36,42 +36,127 @@ impl<'a> Ctx<'a> {
     }
 
     fn project(&self, args: &Map<String, Value>) -> gry_core::GryResult<String> {
+        let store = self.store()?;
         if let Some(project) = args.get("project").and_then(Value::as_str) {
             if !project.is_empty() {
+                if store.project(project)?.is_none() {
+                    return Err(project_resolution_error(
+                        &store,
+                        &format!("project not found or not indexed: {project}"),
+                        None,
+                    ));
+                }
                 return Ok(project.to_string());
             }
         }
+        // A remembered project is only reused while it still exists. A project
+        // deleted or renamed mid-session must not make every later call fail
+        // with a misleading "project is required" error.
         if let Some(project) = self.last_project.lock().clone() {
-            return Ok(project);
+            if store.project(&project)?.is_some() {
+                return Ok(project);
+            }
         }
-        let store = self.store()?;
         for root in self.roots {
             if let Ok(Some(record)) = store.project_by_root(root) {
                 return Ok(record.name);
             }
-            if let Ok(canonical) = std::path::Path::new(root).canonicalize() {
-                if let Ok(Some(record)) = store.project_by_root(&canonical.to_string_lossy()) {
-                    return Ok(record.name);
-                }
+            let canonical = std::path::Path::new(root)
+                .canonicalize()
+                .unwrap_or_else(|_| std::path::PathBuf::from(root));
+            if let Ok(Some(record)) = store.project_by_root(&canonical.to_string_lossy()) {
+                return Ok(record.name);
             }
         }
         if let Ok(cwd) = std::env::current_dir() {
             if let Ok(Some(record)) = store.project_by_root(&cwd.to_string_lossy()) {
                 return Ok(record.name);
             }
+            let containing = store.projects_containing_path(&cwd)?;
+            // Only a unique, deepest root is deterministic. Two projects that
+            // share the same root are ambiguous, so report both instead of
+            // choosing one arbitrarily.
+            if let Some(first) = containing.first() {
+                let depth = std::path::Path::new(&first.root_path).components().count();
+                let tied: Vec<_> = containing
+                    .iter()
+                    .filter(|project| {
+                        std::path::Path::new(&project.root_path)
+                            .components()
+                            .count()
+                            == depth
+                    })
+                    .collect();
+                if tied.len() == 1 {
+                    return Ok(first.name.clone());
+                }
+                let names = tied
+                    .iter()
+                    .map(|project| project.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(gry_core::GryError::invalid(format!(
+                    "multiple indexed projects share the workspace root {}: {names}; pass project explicitly",
+                    cwd.display()
+                )));
+            }
         }
         let projects = store.projects()?;
         if projects.len() == 1 {
             return Ok(projects[0].name.clone());
         }
-        Err(gry_core::GryError::invalid(
-            "project is required; call list_projects to see indexed projects",
+        Err(project_resolution_error(
+            &store,
+            "project is required and this workspace does not match an indexed project",
+            std::env::current_dir().ok().as_deref(),
         ))
     }
 
     fn remember(&self, project: &str) {
         *self.last_project.lock() = Some(project.to_string());
     }
+}
+
+/// Build an actionable project-resolution error. Agents recover from a missing
+/// project only if the error names the alternatives and the exact next step;
+/// an opaque "project is required" costs another round trip (or aborts the
+/// task). The list is bounded so the message cannot grow without limit.
+fn project_resolution_error(
+    store: &Store,
+    context: &str,
+    cwd: Option<&std::path::Path>,
+) -> gry_core::GryError {
+    let mut message = String::from(context);
+    if let Some(cwd) = cwd {
+        message.push_str(&format!(". Current workspace: {}", cwd.display()));
+    }
+    match store.projects() {
+        Ok(projects) if !projects.is_empty() => {
+            let mut rows = Vec::new();
+            for project in projects.iter().take(10) {
+                let root = std::path::Path::new(&project.root_path);
+                let availability = if root.is_dir() { "" } else { ", root missing" };
+                rows.push(format!(
+                    "{} ({}{})",
+                    project.name, project.root_path, availability
+                ));
+            }
+            message.push_str(&format!(
+                ". Indexed projects: {}{}. Pass project=<name>, or index this workspace with index_repository using repo_path set to the workspace root.",
+                rows.join("; "),
+                if projects.len() > 10 { "; …" } else { "" }
+            ));
+        }
+        Ok(_) => {
+            message.push_str(
+                ". No projects are indexed. Call index_repository with repo_path set to the workspace root.",
+            );
+        }
+        Err(error) => {
+            message.push_str(&format!(". Could not list indexed projects: {error}"));
+        }
+    }
+    gry_core::GryError::invalid(message)
 }
 
 fn s(args: &Map<String, Value>, key: &str) -> Option<String> {
@@ -252,7 +337,12 @@ fn delete_project(
     ctx: &Ctx<'_>,
     args: &Map<String, Value>,
 ) -> gry_core::GryResult<(Value, String, usize)> {
-    let project = ctx.project(args)?;
+    // Destructive operations must never fall back to a workspace default.
+    let project = s(args, "project").ok_or_else(|| {
+        gry_core::GryError::invalid(
+            "missing required argument: project (deletion never defaults to the workspace project)",
+        )
+    })?;
     let mut store = ctx.store()?;
     if store.delete_project(&project)? {
         if ctx.last_project.lock().as_deref() == Some(&project) {
@@ -497,9 +587,23 @@ fn search_code_tool(
 ) -> gry_core::GryResult<(Value, String, usize)> {
     let project = ctx.project(args)?;
     let store = ctx.store()?;
+    let pattern = match (s(args, "pattern"), s(args, "query")) {
+        (Some(pattern), Some(query)) if pattern != query => {
+            return Err(gry_core::GryError::invalid(
+                "pattern and its alias query were both supplied with different values; pass exactly one",
+            ))
+        }
+        (Some(pattern), _) => pattern,
+        (None, Some(query)) => query,
+        (None, None) => {
+            return Err(gry_core::GryError::invalid(
+                "missing required argument: pattern (alias: query). Pass the literal or regular expression to search for.",
+            ))
+        }
+    };
     let req = SearchCodeRequest {
         project,
-        pattern: required_s(args, "pattern")?,
+        pattern,
         file_pattern: s(args, "file_pattern"),
         path_filter: s(args, "path_filter"),
         mode: s(args, "mode").unwrap_or_else(|| "compact".to_string()),
@@ -583,8 +687,9 @@ fn adr_tool(
     ctx: &Ctx<'_>,
     args: &Map<String, Value>,
 ) -> gry_core::GryResult<(Value, String, usize)> {
-    let project = ctx.project(args)?;
+    let project = required_s(args, "project")?;
     let store = ctx.store()?;
+    store.require_project(&project)?;
     let updates = args
         .get("section_updates")
         .and_then(Value::as_object)
@@ -608,8 +713,9 @@ fn traces_tool(
     ctx: &Ctx<'_>,
     args: &Map<String, Value>,
 ) -> gry_core::GryResult<(Value, String, usize)> {
-    let project = ctx.project(args)?;
+    let project = required_s(args, "project")?;
     let store = ctx.store()?;
+    store.require_project(&project)?;
     let traces = args
         .get("traces")
         .and_then(Value::as_array)

@@ -135,6 +135,29 @@ and query portions.
 - The 100k-file / 500k-node peak-RSS target has **not** been measured; 10k files / 50k nodes
   measured 749 MB.
 
+## Workload D — 2026-11-03 regression baseline
+
+This run compares the previous `HEAD` (`01e422f`, binary built from an isolated worktree) with the
+current working tree on the same machine, fixture, cache-clearing procedure and release profile.
+The fixture is `eval/gen_synthetic.py medium --files 10000`: **10,002 files**, 3,759,198 bytes,
+**50,207 nodes**, **241,735 edges**.
+
+| Operation | Before p50 | After p50 | Change |
+|---|---:|---:|---:|
+| Full index (fresh cache) | 6,493 ms | 5,963 ms | −8% |
+| Unchanged re-index | 349 ms | 229 ms | −34% |
+| One-file comment edit | 409 ms | 270 ms | −34% |
+| Full-index peak RSS | 1,169 MB | 1,171 MB | unchanged |
+
+Full-index samples: 2 per build (fresh cache each); unchanged/edit: 3 samples each. Full throughput
+is ~1,540 files/s before and ~1,680 files/s after. The incremental improvement comes from removing a
+redundant whole-graph orphan scan that ran before every index and mutated the last valid generation
+even when the run was later rejected; delta publication already reconciles deleted files inside the
+transaction. The full-index difference is within run-to-run noise.
+
+Content hashing is still recomputed for every discovered file (the bytes are already read for
+language disambiguation); no benchmark-specific shortcut was added.
+
 ## Known measurement limits
 
 - macOS `maximum resident set size` includes shared pages; cross-process comparisons are approximate.

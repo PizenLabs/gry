@@ -37,7 +37,7 @@ full list of node labels, edge types and the language set is in the [README](../
 | DISC-02 | PARTIAL | U | Deterministic order, symlink skipping; `excluded` reports the first 25 sampled directories rather than every skipped subtree |
 | DISC-03 | PARTIAL | U, D | 80+ mapped formats; 68 grammars; lexical fallback for grammar-less formats |
 | DISC-04 | VERIFIED | U, I | Max files/source MiB fail the request before publication; oversized/read failures are reported |
-| DISC-05 | VERIFIED | I, B | mtime/size + SHA reuse; delta rebuild; nodes-only fast path; deletes remove nodes/edges/cache; incremental graph compared with a clean rebuild |
+| DISC-05 | VERIFIED | I, B | content SHA recomputed on every discovery; delta rebuild; nodes-only fast path; deletes remove nodes/edges/cache; incremental graph compared with a clean rebuild |
 | DISC-06 | VERIFIED | I (`artifact_round_trip`) | SQLite+zstd artifact, sidecar metadata, SHA check, import into a clean project |
 
 ## Parsing and language intelligence
@@ -67,7 +67,7 @@ full list of node labels, edge types and the language set is in the [README](../
 | GRAPH-06 | PARTIAL | I | overview/structure/dependencies/routes/languages/packages/entry_points/hotspots/boundaries/layers/file_tree/clusters/cycles; `system_structure` excluded |
 | GRAPH-07 | VERIFIED | I, M | label/edge counts, relationship patterns, property diagnostics |
 | GRAPH-08 | VERIFIED | U, I | stable node/edge identities, deterministic additions/removals, exact totals |
-| GRAPH-09 | VERIFIED | I, M | coverage rows, path/scope freshness, parse partial/unusable, metadata |
+| GRAPH-09 | VERIFIED | I, M | coverage rows, path/scope freshness, parse partial/unusable, metadata; a recorded-but-absent file is `missing_on_disk` and a missing root is `unavailable`, never verified-fresh |
 | GRAPH-10 | VERIFIED | I | test markers and TESTS edges (test→product) |
 | GRAPH-11 | PARTIAL | I, B | Bottom-k MinHash/LSH `SIMILAR_TO`; Nomic-vector `SEMANTICALLY_RELATED` with rare-token gating. Derived edges are preserved across a delta and refreshed on a full index |
 | GRAPH-12 | VERIFIED | U, I | observed calls/paths by QN, run labels, counts, unresolved reporting, age-out |
@@ -166,7 +166,7 @@ full list of node labels, edge types and the language set is in the [README](../
 | MCP-09 | VERIFIED | M | trace_path + alias + modes |
 | MCP-10 | VERIFIED | M | snippets/outlines |
 | MCP-11 | VERIFIED | M | schema/architecture/compare |
-| MCP-12 | PARTIAL | M, I | compact/full/files, regex, context and snapshot result cursors; raw-match pagination remains offset-based |
+| MCP-12 | PARTIAL | M, I | compact/full/files, regex, `pattern` with documented `query` alias, context and snapshot result cursors; raw-match pagination remains offset-based |
 | MCP-13 | VERIFIED | M | detect_changes |
 | MCP-14 | VERIFIED | M | manage_adr |
 | MCP-15 | VERIFIED | M | ingest_traces |
@@ -202,6 +202,10 @@ hidden failures.
   implemented, and unknown input always falls back to `run_all`.
 - **Search pagination**: `query_graph`, `trace_path` and `search_code` results are snapshot-bound;
   raw-match pagination and other tools use offsets.
+- **Source availability**: graph-only queries keep working while a project root is missing, moved or
+  unreadable. `search_code` and full `get_code_snippet` fail explicitly in that state; coverage marks
+  recorded files `missing_on_disk`/`unavailable` and never reports them fresh. Re-index at the
+  current path to restore source access.
 - **Diagnostics** include status, coverage and `doctor`; there is no retained trajectory/snapshot
   history.
 - **Watcher** is opt-in and polling-based; MCP auto-index runs only when configured.

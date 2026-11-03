@@ -4,7 +4,6 @@
 use crate::discover::{discover, DiscoverOptions, IndexMode};
 use crate::pipeline::{IndexRequest, Indexer};
 use gry_core::config::Config;
-use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
@@ -82,12 +81,11 @@ fn tree_state(root: &Path) -> String {
         }
     }
     // Non-git: hash path+size+mtime using the indexer's discovery rules.
-    let known: HashMap<String, gry_core::types::FileHash> = HashMap::new();
     let options = DiscoverOptions {
         mode: IndexMode::Full,
         ..Default::default()
     };
-    match discover(root, &options, &known, &AtomicBool::new(false)) {
+    match discover(root, &options, &AtomicBool::new(false)) {
         Ok(discovery) => {
             let mut state = String::new();
             for file in discovery.files {

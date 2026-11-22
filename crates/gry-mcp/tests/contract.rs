@@ -111,12 +111,30 @@ fn all_eighteen_tools_succeed() {
     let mut srv = server(&dir);
     let root_str = root.to_string_lossy().to_string();
 
-    let index = call(&mut srv, "index_repository", json!({"repo_path": root_str}));
+    let index = call(
+        &mut srv,
+        "index_repository",
+        json!({"repo_path": root_str.clone()}),
+    );
     assert_eq!(index["project"], "repo");
     assert!(index["nodes"].as_i64().unwrap() > 20);
 
     let projects = call(&mut srv, "list_projects", json!({"detail":"stats"}));
     assert_eq!(projects["projects"][0]["name"], "repo");
+    // The explicit project value may be the indexed root or a descendant
+    // directory; both must resolve to the same project deterministically.
+    let by_root = call(
+        &mut srv,
+        "search_graph",
+        json!({"project": root_str, "name_pattern":"Engine"}),
+    );
+    assert!(by_root["total"].as_i64().unwrap() >= 1);
+    let by_descendant = call(
+        &mut srv,
+        "search_graph",
+        json!({"project": root.join("src").to_string_lossy(), "name_pattern":"Engine"}),
+    );
+    assert_eq!(by_descendant["project"], "repo");
     let status = call(
         &mut srv,
         "index_status",
@@ -171,9 +189,13 @@ fn all_eighteen_tools_succeed() {
     let schema = call(
         &mut srv,
         "get_graph_schema",
-        json!({"project":"repo","diagnostics":"full"}),
+        json!({"project":"repo","diagnostics":"full","max_output_tokens":50000}),
     );
     assert!(schema["labels"].as_array().unwrap().len() > 5);
+    assert!(
+        schema["properties"].is_object(),
+        "schema properties missing: {schema}"
+    );
     let compare = call(
         &mut srv,
         "compare_graphs",
@@ -285,6 +307,51 @@ fn errors_and_prompts() {
         .as_str()
         .unwrap()
         .contains("detect_changes"));
+}
+
+#[test]
+fn async_status_after_restart_is_not_reported_as_succeeded() {
+    let dir = fixture();
+    let root = dir.path().join("repo");
+    let config = Config {
+        cache_dir: dir.path().join("cache"),
+        db_path: dir.path().join("cache/graph.db"),
+        allowed_root: None,
+        workers: 2,
+        max_files: None,
+        max_source_mb: None,
+        settings: RuntimeSettings::default(),
+    };
+    let mut srv = Server::new(config.clone(), ToolProfile::All);
+    call(
+        &mut srv,
+        "index_repository",
+        json!({"repo_path": root.to_string_lossy()}),
+    );
+    gry_index::pipeline::write_job_status(
+        &config,
+        "repo",
+        &json!({
+            "project": "repo",
+            "state": "running",
+            "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": null,
+            "error": null,
+            "report": null,
+        }),
+    );
+    let mut restarted = Server::new(config, ToolProfile::All);
+    let status = call(
+        &mut restarted,
+        "index_repository",
+        json!({"repo_path": root.to_string_lossy(), "status": true}),
+    );
+    assert_eq!(status["state"], "running");
+    assert_eq!(status["stale_status"], true);
+    assert!(status["note"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("re-run index_repository"));
 }
 
 #[test]

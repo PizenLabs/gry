@@ -167,7 +167,7 @@ telemetry; downloads use the system `curl`, `wget`, or PowerShell.
 ```bash
 gry update                      # install the latest stable release
 gry update --check              # report only
-gry update --version v1.0.4     # pin or downgrade a specific release
+gry update --version v1.0.5     # pin or downgrade a specific release
 gry update --dry-run            # show the asset and path without changing anything
 ```
 

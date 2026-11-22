@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "gry"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "chrono",
  "clap",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "gry-core"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "lzma-rust2",
  "once_cell",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "gry-index"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "chrono",
  "fs2",
@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "gry-mcp"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "chrono",
  "gry-core",
@@ -655,7 +655,7 @@ dependencies = [
 
 [[package]]
 name = "gry-parse"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "cortexkit-tree-sitter-scss",
  "gry-core",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "gry-query"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "base64",
  "chrono",
@@ -762,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "gry-store"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "chrono",
  "globset",

@@ -193,8 +193,9 @@ checksum verification. `GRY_REPO`, `GRY_RELEASES_URL`, `GRY_UPDATE_API_URL` and
 
 The published packages are `gry-core`, `gry-store`, `gry-parse`, `gry-index`, `gry-query`,
 `gry-mcp`, and `gry`. They are released together at the workspace version and must be published in
-that dependency order. Repository, homepage, readme, keywords, categories, and `rust-version` are
-inherited from `[workspace.package]`; each crate adds its own description. Internal dependencies
+that dependency order. Repository, readme, keywords, categories, and `rust-version` are
+inherited from `[workspace.package]`; each crate adds its own description. A separate `homepage`
+is not set because it would duplicate `repository`. Internal dependencies
 carry both `path` and `version` in `[workspace.dependencies]`, so Cargo rewrites them to registry
 requirements when packaging.
 

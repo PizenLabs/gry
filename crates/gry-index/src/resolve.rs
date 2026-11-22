@@ -387,6 +387,18 @@ impl Registry {
             if !language_compatible(caller_language, &cand.language) {
                 continue;
             }
+            // CALLS must point at something callable. A field, constant or
+            // plain type with a matching name is not evidence of a call; Go
+            // conversions (`ProductID(s)`) and field reads used to surface as
+            // CALLS edges because of name/same-file scoring. Explicit
+            // constructors (`new T`) and class instantiation in languages with
+            // implicit constructors remain valid type targets.
+            let callable = matches!(cand.label.as_str(), labels::FUNCTION | labels::METHOD);
+            let type_target = labels::is_type_like(&cand.label)
+                && (call.kind == "constructor" || caller_language != "go");
+            if !callable && !type_target {
+                continue;
+            }
             let mut score = 0.25f64;
             let mut reason: &'static str = "name";
             // Receiver type / self dispatch.
@@ -411,7 +423,27 @@ impl Registry {
                     score += 0.30;
                     reason = "receiver_suffix";
                 } else if cand.label == "Method" {
-                    score -= 0.10;
+                    // The call carries a known receiver type and this method
+                    // belongs to a different type. Name uniqueness and
+                    // same-module proximity must not override that evidence.
+                    continue;
+                }
+            }
+            // Go method dispatch needs a receiver type. `w.Header().Add` has a
+            // receiver expression but no inferable type; treating the
+            // same-module bonus as sufficient created edges to unrelated
+            // interface methods with common names.
+            if caller_language == "go"
+                && cand.label == labels::METHOD
+                && call.receiver_type.is_none()
+                && call
+                    .receiver
+                    .as_deref()
+                    .is_some_and(|receiver| !receiver.trim().is_empty())
+            {
+                score -= 0.50;
+                if reason == "name" {
+                    reason = "untyped_receiver";
                 }
             }
             if call.receiver.as_deref() == Some("self") || call.receiver.as_deref() == Some("this")
@@ -816,6 +848,129 @@ mod tests {
         assert_eq!(
             binding.target_module.as_deref(),
             Some("p.internal.database")
+        );
+    }
+
+    #[test]
+    fn go_calls_do_not_resolve_to_fields_or_plain_types() {
+        let mut field = symbol(
+            "p.events.lineDTO.ProductID",
+            "ProductID",
+            "Field",
+            "events.go",
+            "p.events",
+            &["lineDTO"],
+        );
+        field.language = "go".to_string();
+        let mut ty = symbol(
+            "p.cart.Currency",
+            "Currency",
+            "Type",
+            "cart.go",
+            "p.cart",
+            &[],
+        );
+        ty.language = "go".to_string();
+        let mut method = symbol(
+            "p.domain.Line.ProductID",
+            "ProductID",
+            "Method",
+            "domain.go",
+            "p.domain",
+            &["Line"],
+        );
+        method.language = "go".to_string();
+        let files = vec![
+            (FileExtract::default(), "events.go".to_string(), true),
+            (FileExtract::default(), "cart.go".to_string(), true),
+            (FileExtract::default(), "domain.go".to_string(), true),
+        ];
+        let registry = Registry::build("p", &files, vec![field, ty, method]);
+        for name in ["ProductID", "Currency"] {
+            let call = CallSite {
+                name: name.to_string(),
+                receiver: Some("v".to_string()),
+                receiver_type: Some("Line".to_string()),
+                ..Default::default()
+            };
+            if let Some(resolved) =
+                registry.resolve_call("p", "events.go", "p.events", &[], "go", &call)
+            {
+                assert_eq!(resolved.target_qn, "p.domain.Line.ProductID");
+            }
+        }
+        let conversion = CallSite {
+            name: "Currency".to_string(),
+            receiver: None,
+            ..Default::default()
+        };
+        assert!(
+            registry
+                .resolve_call("p", "cart.go", "p.cart", &[], "go", &conversion)
+                .is_none(),
+            "a Go type conversion is not a call"
+        );
+    }
+
+    #[test]
+    fn go_untyped_receiver_does_not_bind_same_module_methods() {
+        let mut catalog = symbol(
+            "p.layout.bounded_context.catalogService.Add",
+            "Add",
+            "Method",
+            "layout/bounded_context.go",
+            "p.layout",
+            &["catalogService"],
+        );
+        catalog.language = "go".to_string();
+        let mut header = symbol(
+            "p.layout.http.buffer.Header",
+            "Header",
+            "Method",
+            "layout/http.go",
+            "p.layout",
+            &["buffer"],
+        );
+        header.language = "go".to_string();
+        let symbols = vec![catalog, header];
+        let files = vec![
+            (
+                FileExtract::default(),
+                "layout/bounded_context.go".to_string(),
+                true,
+            ),
+            (FileExtract::default(), "layout/http.go".to_string(), true),
+            (
+                FileExtract::default(),
+                "layout/http_cart.go".to_string(),
+                true,
+            ),
+        ];
+        let registry = Registry::build("p", &files, symbols);
+        let call = CallSite {
+            name: "Add".to_string(),
+            receiver: Some("w.Header()".to_string()),
+            receiver_type: None,
+            ..Default::default()
+        };
+        assert!(
+            registry
+                .resolve_call("p", "layout/http_cart.go", "p.layout", &[], "go", &call)
+                .is_none(),
+            "an untyped receiver must not absorb a same-module interface method"
+        );
+        let typed = CallSite {
+            name: "Add".to_string(),
+            receiver: Some("handler.catalogSrv".to_string()),
+            receiver_type: Some("catalogService".to_string()),
+            ..Default::default()
+        };
+        let resolved = registry
+            .resolve_call("p", "layout/http_cart.go", "p.layout", &[], "go", &typed)
+            .expect("typed interface call");
+        assert_eq!(
+            resolved.target_qn,
+            "p.layout.bounded_context.catalogService.Add"
         );
     }
 

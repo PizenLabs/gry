@@ -1366,6 +1366,20 @@ fn project_rows(
     let columns: Vec<String> = items.iter().map(item_name).collect();
     let mut out: Vec<(Vec<Value>, Binding)> = Vec::new();
     if has_aggregate {
+        // A global aggregate over an empty match still yields one row
+        // (`count` = 0). Returning zero rows made an absent label look like an
+        // invalid query. Grouped aggregates over no input correctly yield no
+        // rows, so only apply this when every projection is an aggregate.
+        if rows.is_empty() && items.iter().all(|item| contains_aggregate(&item.expr)) {
+            let mut values = Vec::new();
+            let mut scope = Binding::default();
+            for (item, name) in items.iter().zip(columns.iter()) {
+                let value = eval_aggregate(&item.expr, &[], graph)?;
+                values.push(value.clone());
+                scope.insert(name.clone(), value);
+            }
+            out.push((values, scope));
+        }
         let mut groups: HashMap<String, Vec<Binding>> = HashMap::new();
         let mut order = Vec::new();
         for b in rows {
@@ -2152,6 +2166,11 @@ mod tests {
         let store = test_store();
         let out = run(&store, "MATCH (f:Function) RETURN count(f)");
         assert_eq!(out["rows"][0][0], 5);
+        let empty = run(&store, "MATCH (f:NoSuchLabel) RETURN count(f)");
+        assert_eq!(empty["rows"][0][0], 0);
+        assert_eq!(empty["total"], 1);
+        let grouped = run(&store, "MATCH (f:NoSuchLabel) RETURN f.name, count(f)");
+        assert_eq!(grouped["rows"].as_array().unwrap().len(), 0);
         let out = run(
             &store,
             "MATCH (f:Function) WHERE NOT EXISTS { (f)<-[:CALLS]-() } RETURN f.name ORDER BY f.name",

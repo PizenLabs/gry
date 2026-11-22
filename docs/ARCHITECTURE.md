@@ -180,7 +180,8 @@ suppressed when a call edge already covers the same caller/name. Every resolved 
 Resolution is syntactic and inference-based; it does not run an external language server. Type
 inference covers common annotation/constructor/receiver patterns for major languages; exact /
 inferred / ambiguous / unresolved are distinguished. [CAPABILITIES.md](CAPABILITIES.md) records the
-language-by-language status.
+language-by-language status. Go interface calls resolve to the interface method declaration; Go's
+implicit interface satisfaction is not converted into `IMPLEMENTS` edges.
 
 ## 6. Search and semantics
 

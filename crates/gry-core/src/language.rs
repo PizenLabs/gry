@@ -196,6 +196,17 @@ pub static LANGUAGES: &[LanguageDef] = &[
         &[]
     ),
     lang!("html", Some("html"), Code, false, &["html", "htm"], &[]),
+    // Go template sources are text/HTML-like but contain `{{...}}` directives
+    // that the HTML grammar cannot parse faithfully. Keep them as recognised,
+    // searchable files instead of dropping them from discovery.
+    lang!(
+        "gotemplate",
+        None,
+        Code,
+        false,
+        &["gohtml", "gotmpl", "tmpl"],
+        &[]
+    ),
     lang!("css", Some("css"), Code, false, &["css"], &[]),
     lang!("scss", Some("css"), Code, false, &["scss", "sass"], &[]),
     lang!("vue", Some("vue"), Code, false, &["vue"], &[]),
@@ -526,6 +537,11 @@ mod tests {
             "kustomize"
         );
         assert_eq!(detect("compose.yml").unwrap().name, "compose");
+        assert_eq!(
+            detect("layout/tmpl/cart/show.gohtml").unwrap().name,
+            "gotemplate"
+        );
+        assert_eq!(detect("layout/email.tmpl").unwrap().name, "gotemplate");
     }
 
     #[test]

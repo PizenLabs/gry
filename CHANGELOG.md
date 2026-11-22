@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.5 — 2026-11-22
 
 ### Added
 
@@ -13,6 +13,41 @@
   Homebrew, Nix, Scoop and Chocolatey installs are refused by default so the
   package manager stays in control. No update service, account, or telemetry is
   involved; downloads use the system `curl`/`wget`/PowerShell.
+- Go templates (`.gohtml`, `.gotmpl`, `.tmpl`) are recognized as a file-only
+  language. They are indexed and searchable as files but produce no symbols.
+
+### Fixed
+
+- Go receiver types are inferred across files. A call through a parameter's
+  field in another file, or through a locally declared field type, now resolves
+  to the declared method instead of being dropped. Go `type_spec` and
+  `type_alias` declarations are classified as types, interface methods are
+  extracted, and Go parameters are labelled from their declarations.
+- Go `CALLS` edges no longer target fields, plain types, or unrelated
+  same-module methods with a conflicting receiver type. Route `HANDLES` edges
+  point only at callables, so middleware arguments are not mistaken for
+  handlers, and wrapped handler expressions resolve correctly.
+- Source reads validate the indexed SHA-256. Full `get_code_snippet` and outline
+  requests reject missing, unindexed, directory and traversal paths, and a file
+  edited after indexing is refused instead of served. `auto` source mode bounds
+  snippets at 120 lines and returns continuation metadata.
+- `check_index_coverage` hashes explicitly requested paths even when size and
+  mtime match, so a preserved-timestamp edit is reported as stale.
+- `search_graph`'s explicit BM25 target fallback requires every identifier token
+  to match, so a nonexistent target no longer resolves to an unrelated symbol.
+- Cypher global aggregates over empty input return one row (`count` = 0) instead
+  of no rows; grouped aggregates still return no rows.
+- MCP project resolution accepts an indexed root or any descendant directory as
+  an explicit project. Persisted async job status is read after a restart, and a
+  job left queued or running is reported as stale rather than succeeded.
+- Nested outline, compare and context arrays are truncated with continuation
+  metadata under the output budget instead of being dropped.
+- Routes rank below declarations in name and filter-only search results.
+- `graph-schema` and `compare-graphs` accept `max_output_tokens`.
+- Extractor version 37 rebuilds existing indexes once so the new Go extraction
+  and resolution semantics apply; no schema migration is required.
+- Removed unused workspace dependencies (`anyhow`, `crossbeam-channel`,
+  `notify`, `itertools`) and the non-inheritable `homepage` key.
 
 ## 1.0.4 — 2026-11-03
 

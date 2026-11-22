@@ -7,7 +7,6 @@ license.workspace = true
 authors.workspace = true
 description = "Local-first code intelligence for AI agents"
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true

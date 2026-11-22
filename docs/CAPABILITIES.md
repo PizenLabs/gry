@@ -26,7 +26,8 @@ full list of node labels, edge types and the language set is in the [README](../
   without a compatible modern grammar. Fallback nodes are explicitly marked.
 - Source languages, Markdown/RST/AsciiDoc, PDF text layers, JSON/YAML/TOML/INI/.env, package
   manifests, Dockerfile/Compose, Kubernetes/Helm/Kustomize, Terraform/OpenTofu, Ansible, Make and CI
-  workflows are first-class inputs.
+  workflows are first-class inputs. Go templates (`.gohtml`, `.gotmpl`, `.tmpl`) are file-only inputs:
+  they are discovered and searchable but not parsed into symbols.
 - Files that are recognised but unparsed still become `File` nodes and remain searchable.
 
 ## Discovery and file lifecycle
@@ -50,7 +51,7 @@ full list of node labels, edge types and the language set is in the [README](../
 | LANG-04 | PARTIAL | U, D | Relative/bare imports, Rust crate paths, manifests; some language-specific forms use generic extraction |
 | LANG-05 | PARTIAL | U | Calls/receivers/args for major languages; Rust macro bodies are scanned lexically |
 | LANG-06 | PARTIAL | U, I, D | Import/same-file/same-module/unique/suffix/receiver scoring with confidence; annotation, field, constructor and return-chain inference. No external LSP; uncertainty is explicit |
-| LANG-07 | PARTIAL | I | INHERITS/IMPLEMENTS/DECORATES/OVERRIDE implemented; trait/generic/interface-default edge cases are incomplete |
+| LANG-07 | PARTIAL | I | INHERITS/IMPLEMENTS/DECORATES/OVERRIDE implemented for explicit declarations. Go interface satisfaction is implicit: interface method sets and concrete method sets are indexed, but structural matching is not synthesized into `IMPLEMENTS` edges |
 | LANG-08 | PARTIAL | I, D | USAGE/CALL_REFERENCE/THROWS/RAISES/WRITES partly implemented; USAGE is broad while throws/writes are minimal |
 | LANG-09 | VERIFIED | U (MinHash/profile), I | Deterministic MinHash, AST profile, complexity/importance; not a full language-specific complexity model |
 | LANG-10 | PARTIAL | U | Syntactic/type inference instead of Hybrid-LSP; unresolved/inferred/ambiguous states are recorded |

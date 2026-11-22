@@ -1325,3 +1325,49 @@ fn go_route_registration_links_its_handler_across_files() {
         trace.hops
     );
 }
+
+#[test]
+fn go_call_through_a_parameter_field_resolves_across_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("gomini");
+    fs::create_dir_all(&root).unwrap();
+    write(&root, "go.mod", "module example.test/gomini\n\ngo 1.22\n");
+    write(
+        &root,
+        "svc/types.go",
+        "package svc\n\ntype ID string\n\ntype Storage interface {\n\tAdd(id ID) error\n}\n\ntype English struct {\n\tstore Storage\n}\n",
+    );
+    write(
+        &root,
+        "svc/use.go",
+        "package svc\n\nfunc Use(e English, id ID) error {\n\treturn e.store.Add(id)\n}\n",
+    );
+    let cfg = config(dir.path());
+    let indexer = Indexer::new(cfg.clone());
+    let report = indexer
+        .index(&IndexRequest::new(root.to_string_lossy()))
+        .unwrap();
+    let store = Store::open(&cfg.db_path).unwrap();
+    let trace = store
+        .trace(&gry_store::traverse::TraceParams {
+            project: report.project.clone(),
+            start_qn: format!("{}.svc.types.Storage.Add", report.project),
+            direction: gry_store::traverse::Direction::Inbound,
+            depth: 1,
+            edge_types: vec!["CALLS".to_string()],
+            include_tests: false,
+            limit: 10,
+            parameter_name: None,
+        })
+        .unwrap()
+        .expect("interface method was not indexed");
+    let caller = format!("{}.svc.use.Use", report.project);
+    assert!(
+        trace
+            .hops
+            .iter()
+            .any(|hop| hop.node.qualified_name == caller),
+        "Use -> Storage.Add was not resolved: {:?}",
+        trace.hops
+    );
+}

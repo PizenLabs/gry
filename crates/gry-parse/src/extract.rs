@@ -427,7 +427,7 @@ impl<'a> Extractor<'a> {
                     signature: Some(first_line_window(self.source, node, 160)),
                     ..Default::default()
                 };
-                def.params = extract_params(rhs, self.source);
+                def.params = extract_params(rhs, self.source, self.lang.name);
                 def.docstring = preceding_docstring(self.source, node, "r");
                 self.defs.push(def);
                 true
@@ -485,6 +485,19 @@ impl<'a> Extractor<'a> {
         } else {
             preceding_docstring(self.source, node, self.lang.name)
         };
+        // A declared type belongs to a data declaration (field, variable,
+        // constant), not to a container. `type X struct{...}` also has a
+        // `type` field, but it names the whole struct body; recording it as
+        // X's declared type produced nonsense such as `declared_type: "error"`
+        // for an interface's last method result.
+        let declared_type =
+            if is_function || !matches!(actual_label, "Field" | "Variable" | "Constant") {
+                None
+            } else {
+                node.child_by_field_name("type")
+                    .map(|ty| simple_type_name(text(self.source, ty)))
+                    .filter(|name| !name.is_empty())
+            };
         let mut def = Def {
             label: actual_label.to_string(),
             name: name.clone(),
@@ -494,7 +507,7 @@ impl<'a> Extractor<'a> {
             docstring,
             signature: Some(first_line_window(self.source, node, 240)),
             params: if is_function {
-                extract_params(node, self.source)
+                extract_params(node, self.source, self.lang.name)
             } else {
                 Vec::new()
             },
@@ -503,7 +516,17 @@ impl<'a> Extractor<'a> {
             } else {
                 None
             },
-            bases: extract_bases(node, self.source, self.lang.name),
+            type_name: declared_type,
+            // Go has no explicit inheritance clause. Running the generic base
+            // extractor on a type spec would treat an interface body as a base
+            // list and invent IMPLEMENTS edges.
+            bases: if self.lang.name == "go"
+                && matches!(node.kind(), "type_spec" | "type_alias" | "method_elem")
+            {
+                Vec::new()
+            } else {
+                extract_bases(node, self.source, self.lang.name)
+            },
             decorators: decorators.to_vec(),
             ..Default::default()
         };
@@ -889,6 +912,7 @@ impl<'a> Extractor<'a> {
                 name,
                 receiver: Some(receiver),
                 receiver_type,
+                receiver_base_type: None,
                 args: Vec::new(),
                 scope: scope.to_vec(),
                 line: line(node) + offset_line,
@@ -937,6 +961,25 @@ fn classify_definition(
     if kind == "ERROR" || kind == "MISSING" {
         return None;
     }
+    // Go declares types through `type_spec`/`type_alias`, whose names live on
+    // the spec rather than the surrounding `type_declaration`. Classifying the
+    // spec (not the declaration) keeps the name and lets the struct/interface
+    // body inherit the container scope, so fields and interface methods are
+    // attached to the type instead of the package.
+    if lang == "go" && matches!(kind, "type_spec" | "type_alias") {
+        let label = node
+            .child_by_field_name("type")
+            .map(|ty| match ty.kind() {
+                "struct_type" => "Struct",
+                "interface_type" => "Interface",
+                _ => "Type",
+            })
+            .unwrap_or("Type");
+        return Some((label, false));
+    }
+    if lang == "go" && kind == "method_elem" && container == Some("Interface") {
+        return Some(("Method", true));
+    }
     let function = matches!(
         kind,
         "function_definition"
@@ -964,6 +1007,7 @@ fn classify_definition(
             || container == Some("Struct")
             || container == Some("Interface")
             || container == Some("Trait")
+            || (lang == "go" && kind == "method_declaration")
         {
             "Method"
         } else {
@@ -1260,6 +1304,21 @@ fn parse_call(
                 })
         }
     });
+    let receiver_base_type = receiver.as_ref().and_then(|r| {
+        let r = r.trim();
+        // Only a plain dotted chain can be walked through project field types.
+        // `w.Header().Add` is a call expression, not a field access.
+        if !r.contains('.') || r.contains('(') {
+            return None;
+        }
+        let base = r
+            .split('.')
+            .next()
+            .unwrap_or(r)
+            .trim()
+            .trim_start_matches(['&', '*']);
+        type_map.get(base).cloned()
+    });
     let args = node
         .child_by_field_name("arguments")
         .or_else(|| node.child_by_field_name("args"))
@@ -1284,6 +1343,7 @@ fn parse_call(
         name,
         receiver,
         receiver_type,
+        receiver_base_type,
         args,
         scope: scope.to_vec(),
         line: line(node),
@@ -1358,7 +1418,7 @@ fn split_args(raw: &str) -> Vec<String> {
     out
 }
 
-fn extract_params(node: Node<'_>, source: &[u8]) -> Vec<String> {
+fn extract_params(node: Node<'_>, source: &[u8], lang: &str) -> Vec<String> {
     let params = node
         .child_by_field_name("parameters")
         .or_else(|| node.child_by_field_name("parameter"))
@@ -1367,6 +1427,9 @@ fn extract_params(node: Node<'_>, source: &[u8]) -> Vec<String> {
     let Some(params) = params else {
         return Vec::new();
     };
+    if lang == "go" {
+        return go_param_names(params, source);
+    }
     split_args(text(source, params))
         .into_iter()
         .filter_map(|p| {
@@ -1394,6 +1457,45 @@ fn extract_params(node: Node<'_>, source: &[u8]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Go parameter lists put the name before the type (`id string`) and allow
+/// grouped names (`a, b int`). The generic "last word is the name" rule used
+/// for other languages would record `string` instead of `id`, which breaks
+/// data-flow queries and parameter-scoped tracing.
+fn go_param_names(params: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = params.walk();
+    for child in params.named_children(&mut cursor) {
+        if !matches!(
+            child.kind(),
+            "parameter_declaration" | "variadic_parameter_declaration"
+        ) {
+            continue;
+        }
+        let type_id = child.child_by_field_name("type").map(|node| node.id());
+        let mut names = Vec::new();
+        let mut inner = child.walk();
+        for part in child.named_children(&mut inner) {
+            if Some(part.id()) == type_id || part.kind() != "identifier" {
+                continue;
+            }
+            let name = text(source, part).trim();
+            if !name.is_empty() {
+                names.push(name.to_string());
+            }
+        }
+        if names.is_empty() {
+            if let Some(ty) = child.child_by_field_name("type") {
+                let name = simple_type_name(text(source, ty));
+                if !name.is_empty() {
+                    names.push(name);
+                }
+            }
+        }
+        out.extend(names);
+    }
+    out
 }
 
 fn extract_return_type(node: Node<'_>, source: &[u8]) -> Option<String> {
@@ -2156,25 +2258,20 @@ fn route_from_call(
     // the second is a plain callable reference is a route even when the
     // receiver variable is named `r`, `group`, or `publicRouter`. An outbound
     // HTTP call has no handler argument (or passes a body expression).
-    let handler_arg = call
+    let handler_ref = call
         .args
         .get(1)
-        .map(|a| a.trim())
-        .filter(|a| is_handler_reference(a));
-    // A non-router receiver is only a route when the second argument is a
-    // qualified method reference (`s.healthHandler`, `tc.Create`) in Go.
-    // This keeps `client.Post("/x", body)` out of the route table.
-    let qualified_handler = lang == "go" && handler_arg.map(|a| a.contains('.')).unwrap_or(false);
+        .and_then(|raw| route_handler_reference(raw, type_map));
+    let qualified_handler = lang == "go"
+        && handler_ref.is_some()
+        && call.args.get(1).map(|a| a.contains('.')).unwrap_or(false);
     if !routeish_receiver && !qualified_handler && name != "handlefunc" && name != "route" {
         return None;
     }
-    let handler = call.args.get(1).map(|a| extract_callable_name(a));
-    let handler_type = handler_arg.and_then(|raw| {
-        let receiver = raw.rsplit_once('.')?.0.trim();
-        type_map.get(receiver).cloned().or_else(|| {
-            (receiver.chars().next().is_some_and(char::is_uppercase)).then(|| receiver.to_string())
-        })
-    });
+    let (handler, handler_type) = match handler_ref {
+        Some((name, ty)) => (Some(name), ty),
+        None => (None, None),
+    };
     Some(RouteDef {
         method,
         path,
@@ -2184,6 +2281,87 @@ fn route_from_call(
         framework: receiver,
         scope: call.scope.clone(),
     })
+}
+
+/// Resolve the handler reference from a registration argument.
+///
+/// Middleware wrapping is common (`observability.HTTPWrap(m.handler.Login,
+/// m.logger)`). Treating the whole expression as a callable name used to pick
+/// the last identifier (`logger`) and create a false `HANDLES` edge to a
+/// logger field. Prefer the first plain method reference inside the wrapper;
+/// fall back to the wrapper/factory callable itself for registrations such as
+/// `HandleFunc("/x", webhookHandler(secret, service))`.
+fn route_handler_reference(
+    raw: &str,
+    type_map: &HashMap<String, String>,
+) -> Option<(String, Option<String>)> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.starts_with('"') || raw.starts_with('\'') {
+        return None;
+    }
+    if let Some(open) = raw.find('(') {
+        let args = split_args(&raw[open..]);
+        for arg in &args {
+            if !is_handler_reference(arg) {
+                continue;
+            }
+            if let Some((name, ty)) = handler_reference_parts(arg, type_map) {
+                if name.chars().next().is_some_and(char::is_uppercase) {
+                    return Some((name, ty));
+                }
+            }
+        }
+        for arg in &args {
+            if arg.contains('(') {
+                if let Some(found) = route_handler_reference(arg, type_map) {
+                    return Some(found);
+                }
+            }
+        }
+        let call_name = raw[..open].trim();
+        if !call_name.is_empty() {
+            let name = extract_callable_name(call_name);
+            if !name.is_empty() {
+                return Some((name, handler_receiver_type(call_name, type_map)));
+            }
+        }
+        return None;
+    }
+    let (name, ty) = handler_reference_parts(raw, type_map)?;
+    Some((name, ty))
+}
+
+fn handler_reference_parts(
+    raw: &str,
+    type_map: &HashMap<String, String>,
+) -> Option<(String, Option<String>)> {
+    if !is_handler_reference(raw) {
+        return None;
+    }
+    let name = extract_callable_name(raw);
+    if name.is_empty() {
+        return None;
+    }
+    let receiver = raw.rsplit_once('.').map(|(receiver, _)| receiver.trim());
+    let handler_type = receiver.and_then(|receiver| {
+        let field = receiver.rsplit('.').next().unwrap_or(receiver);
+        type_map
+            .get(field)
+            .cloned()
+            .or_else(|| type_map.get(receiver).cloned())
+    });
+    Some((name, handler_type))
+}
+
+fn handler_receiver_type(call_name: &str, type_map: &HashMap<String, String>) -> Option<String> {
+    let receiver = call_name
+        .rsplit_once('.')
+        .map(|(receiver, _)| receiver.trim())?;
+    let field = receiver.rsplit('.').next().unwrap_or(receiver);
+    type_map
+        .get(field)
+        .cloned()
+        .or_else(|| type_map.get(receiver).cloned())
 }
 
 /// A handler argument is a symbol reference, not a literal or a body/value
@@ -2713,6 +2891,159 @@ func (s *Server) RegisterRoutes() {
     }
 
     #[test]
+    fn go_response_header_chain_is_not_a_local_method_call() {
+        let src = r#"
+package layout
+
+type httpHandler struct{}
+
+func (h httpHandler) AddToCart(w http.ResponseWriter, r *http.Request) {
+    w.Header().Add("HX-Trigger", "cartBudge")
+}
+"#;
+        let out = extract("layout/http_cart.go", src);
+        let header = out
+            .calls
+            .iter()
+            .find(|call| call.name == "Header")
+            .expect("Header call");
+        assert_eq!(header.receiver.as_deref(), Some("w"));
+        assert_eq!(header.receiver_type.as_deref(), Some("ResponseWriter"));
+        let add = out
+            .calls
+            .iter()
+            .find(|call| call.name == "Add")
+            .expect("Add call");
+        assert_eq!(add.receiver.as_deref(), Some("w.Header()"));
+        assert!(add.receiver_type.is_none());
+    }
+
+    #[test]
+    fn go_type_declarations_keep_names_and_scopes() {
+        let src = r#"
+package sample
+
+type ID string
+type Alias = ID
+type Greeter interface {
+    Greet(name string) string
+}
+type English struct {
+    prefix string
+}
+
+func (e English) Greet(name string) string {
+    return e.prefix + name
+}
+
+func Sum(a, b int) int {
+    return a + b
+}
+"#;
+        let out = extract("sample/sample.go", src);
+        let english = out
+            .defs
+            .iter()
+            .find(|d| d.name == "English")
+            .expect("struct English");
+        assert_eq!(english.label, "Struct");
+        let greeter = out
+            .defs
+            .iter()
+            .find(|d| d.name == "Greeter")
+            .expect("interface Greeter");
+        assert_eq!(greeter.label, "Interface");
+        // Container nodes must not inherit the last member's type as their own
+        // declared type.
+        assert!(english.type_name.is_none(), "{english:?}");
+        assert!(greeter.type_name.is_none(), "{greeter:?}");
+        assert!(out.defs.iter().any(|d| d.name == "ID" && d.label == "Type"));
+        assert!(out
+            .defs
+            .iter()
+            .any(|d| d.name == "Alias" && d.label == "Type"));
+
+        let field = out
+            .defs
+            .iter()
+            .find(|d| d.name == "prefix")
+            .expect("struct field");
+        assert_eq!(field.label, "Field");
+        assert_eq!(field.scope, vec!["English"]);
+        assert_eq!(field.type_name.as_deref(), Some("string"));
+
+        let method = out
+            .defs
+            .iter()
+            .find(|d| d.label == "Method" && d.name == "Greet" && d.scope == ["English"])
+            .expect("concrete method");
+        assert_eq!(method.params, vec!["name"]);
+
+        let iface_method = out
+            .defs
+            .iter()
+            .find(|d| d.label == "Method" && d.name == "Greet" && d.scope == ["Greeter"])
+            .expect("interface method");
+        assert_eq!(iface_method.scope, vec!["Greeter"]);
+        assert_eq!(iface_method.params, vec!["name"]);
+
+        let sum = out
+            .defs
+            .iter()
+            .find(|d| d.name == "Sum")
+            .expect("Sum function");
+        assert_eq!(sum.params, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn go_wrapped_route_handler_uses_the_handler_not_the_middleware_argument() {
+        let src = r#"
+package layout
+
+type httpHandler struct{}
+func (h httpHandler) Login() {}
+func (h httpHandler) Home() {}
+
+type boundedContext struct {
+    handler httpHandler
+    logger  *log.Logger
+    secret  string
+}
+
+func paymentsWebhookHandler(secret string, svc string) http.Handler { return nil }
+
+func (m boundedContext) MuxRegister(r *mux.Router) {
+    r.HandleFunc("/auth/login", observability.HTTPWrap(m.handler.Login, m.logger)).Methods("GET")
+    r.HandleFunc("/", m.handler.Home)
+    r.HandleFunc("/webhooks/payments", observability.HTTPWrap(paymentsWebhookHandler(m.secret, m.handler), m.logger))
+}
+"#;
+        let out = extract("layout/http.go", src);
+        let login = out
+            .routes
+            .iter()
+            .find(|route| route.path == "/auth/login")
+            .expect("wrapped login route");
+        assert_eq!(login.handler.as_deref(), Some("Login"));
+        assert_eq!(login.handler_type.as_deref(), Some("httpHandler"));
+
+        let home = out
+            .routes
+            .iter()
+            .find(|route| route.path == "/")
+            .expect("direct home route");
+        assert_eq!(home.handler.as_deref(), Some("Home"));
+        assert_eq!(home.handler_type.as_deref(), Some("httpHandler"));
+
+        let webhook = out
+            .routes
+            .iter()
+            .find(|route| route.path == "/webhooks/payments")
+            .expect("factory webhook route");
+        assert_eq!(webhook.handler.as_deref(), Some("paymentsWebhookHandler"));
+    }
+
+    #[test]
     fn go_interface_field_calls_carry_the_field_type() {
         let src = r#"
 package controller
@@ -2732,6 +3063,28 @@ func (tc *TaskController) Create(c *gin.Context) {
             .find(|c| c.name == "Create" && c.receiver.as_deref() == Some("tc.TaskUsecase"))
             .expect("interface field call was not extracted");
         assert_eq!(call.receiver_type.as_deref(), Some("TaskUsecase"));
+    }
+
+    #[test]
+    fn go_receiver_base_type_outlives_a_cross_file_field() {
+        let src = r#"
+package svc
+
+func Use(e English, id ID) error {
+    return e.store.Add(id)
+}
+"#;
+        let out = extract("svc/use.go", src);
+        let call = out
+            .calls
+            .iter()
+            .find(|c| c.name == "Add" && c.receiver.as_deref() == Some("e.store"))
+            .expect("field call was not extracted");
+        assert_eq!(call.receiver_base_type.as_deref(), Some("English"));
+        assert!(
+            call.receiver_type.is_none(),
+            "the field type lives in another file and must be resolved there"
+        );
     }
 
     #[test]

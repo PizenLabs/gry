@@ -7,7 +7,6 @@ license.workspace = true
 authors.workspace = true
 description = "Model Context Protocol server for gry"
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -22,7 +21,6 @@ serde_json.workspace = true
 parking_lot.workspace = true
 chrono.workspace = true
 uuid.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

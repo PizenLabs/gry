@@ -155,7 +155,7 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "get_code_snippet",
-            description: "Read one symbol's exact source by qualified name. Use after search_graph/get_task_context for material claims; do not re-run discovery. auto bounds source, full restores it, outline lists members.",
+            description: "Read one symbol's exact source by qualified name. Use after search_graph/get_task_context for material claims; do not re-run discovery. auto bounds source, full restores it, outline lists members. Fails when the file changed since indexing or is unavailable; re-index before relying on it.",
             schema: json!({
                 "type":"object",
                 "properties":{
@@ -180,7 +180,7 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "get_file_outline",
-            description: "Declaration outline of one repository-relative file in source order, with optional exact label filter and paging.",
+            description: "Declaration outline of one repository-relative file in source order, with optional exact label filter and paging. Fails for unindexed, missing or changed files instead of returning an empty outline.",
             schema: json!({
                 "type":"object",
                 "properties":{
@@ -210,7 +210,8 @@ pub fn tools() -> Vec<ToolDef> {
                     "format":{"type":"string","enum":["tree","json"],"default":"tree"},
                     "diagnostics":{"type":"string","enum":["none","full"],"default":"none"},
                     "limit":{"type":"integer","default":50,"minimum":1,"maximum":500},
-                    "offset":{"type":"integer","default":0,"minimum":0}
+                    "offset":{"type":"integer","default":0,"minimum":0},
+                    "max_output_tokens":{"type":"integer","minimum":128,"maximum":1000000}
                 },
             }),
             read_only: true,
@@ -221,14 +222,16 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "compare_graphs",
-            description: "Compare two indexed snapshots by stable node/edge identities with exact totals and truncation.",
+            description: "Compare two indexed projects by stable (project-scoped) node/edge identities with exact totals and truncation. Node identities include the project name, so re-indexing the same repository under a different name reports every node as added/removed.",
             schema: json!({
                 "type":"object",
                 "properties":{
                     "base_project":{"type":"string","minLength":1},
                     "target_project":{"type":"string","minLength":1},
                     "limit":{"type":"integer","minimum":1,"maximum":1000,"default":200},
-                    "scan_limit":{"type":"integer","minimum":1,"maximum":10000000,"default":2000000}
+                    "scan_limit":{"type":"integer","minimum":1,"maximum":10000000,"default":2000000},
+                    "max_output_tokens":{"type":"integer","minimum":128,"maximum":1000000},
+                    "format":{"type":"string","enum":["tree","json"],"default":"tree"}
                 },
                 "required":["base_project","target_project"],
                 "additionalProperties":false

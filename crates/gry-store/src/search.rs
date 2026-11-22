@@ -365,7 +365,7 @@ fn support_order(alias: &str) -> String {
 fn label_order(alias: &str) -> String {
     format!(
         "CASE lower({alias}.label) \
-         WHEN 'function' THEN 0 WHEN 'method' THEN 0 WHEN 'route' THEN 0 \
+         WHEN 'function' THEN 0 WHEN 'method' THEN 0 \
          WHEN 'class' THEN 0 WHEN 'struct' THEN 0 WHEN 'interface' THEN 0 \
          WHEN 'trait' THEN 0 WHEN 'enum' THEN 0 WHEN 'type' THEN 0 \
          WHEN 'field' THEN 1 WHEN 'variable' THEN 1 WHEN 'constant' THEN 1 \
@@ -416,6 +416,42 @@ mod tests {
         };
         let out = store.search(&p).unwrap();
         assert!(out.hits.iter().all(|h| h.node.name != "entryHandler"));
+    }
+
+    #[test]
+    fn route_nodes_rank_below_declarations_in_name_search() {
+        let mut store = Store::open_in_memory().unwrap();
+        let nodes = vec![
+            gry_core::types::NewNode::new(
+                "Route",
+                "/products",
+                "__route__ANY__/products",
+                "routes.go",
+                1,
+                1,
+            ),
+            gry_core::types::NewNode::new(
+                "Struct",
+                "Product",
+                "p.catalog.Product",
+                "product.go",
+                1,
+                2,
+            ),
+        ];
+        let mut write = crate::ProjectWrite::new("p", "/tmp/p", "full", "g");
+        write.nodes = &nodes;
+        store.publish(&write).unwrap();
+        let out = store
+            .search(&SearchParams {
+                project: "p".to_string(),
+                name_pattern: Some("Product".to_string()),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(out.hits[0].node.label, "Struct", "{:?}", out.hits[0].node);
+        assert!(out.hits.iter().any(|hit| hit.node.label == "Route"));
     }
 
     #[test]

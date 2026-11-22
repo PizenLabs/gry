@@ -2101,7 +2101,6 @@ fn node_label_rank(label: &str) -> u8 {
     match label {
         labels::FUNCTION
         | labels::METHOD
-        | labels::ROUTE
         | labels::CLASS
         | labels::STRUCT
         | labels::INTERFACE
@@ -2109,6 +2108,9 @@ fn node_label_rank(label: &str) -> u8 {
         | labels::ENUM
         | labels::TYPE => 0,
         labels::FIELD | labels::VARIABLE | labels::CONSTANT => 1,
+        // Routes are navigational endpoints, not declarations. Ranking them
+        // with functions made every `/product/...` route outrank the `Product`
+        // symbol in a literal name search.
         _ => 2,
     }
 }

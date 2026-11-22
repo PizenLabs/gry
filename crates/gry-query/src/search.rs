@@ -698,6 +698,13 @@ pub fn get_code_snippet(store: &Store, req: &SnippetRequest) -> gry_core::GryRes
                 error
             ))
         })?;
+        ensure_source_matches_index(
+            store,
+            &req.project,
+            &node.file_path,
+            &node.qualified_name,
+            text.as_bytes(),
+        )?;
         let lines: Vec<&str> = text.lines().collect();
         if start > lines.len() {
             return Err(gry_core::GryError::invalid(format!(
@@ -709,7 +716,16 @@ pub fn get_code_snippet(store: &Store, req: &SnippetRequest) -> gry_core::GryRes
             )));
         }
         let end = end.min(lines.len());
-        let max_lines = req.max_lines.unwrap_or(usize::MAX);
+        // `auto` must return something an agent can act on. Previously a large
+        // function produced no source at all once the MCP row budget dropped
+        // it. Return a bounded window with an explicit continuation line.
+        let max_lines = req.max_lines.unwrap_or_else(|| {
+            if req.source_mode == "auto" {
+                120
+            } else {
+                usize::MAX
+            }
+        });
         let page: Vec<String> = lines
             .iter()
             .skip(start.saturating_sub(1))
@@ -732,6 +748,18 @@ pub fn get_code_snippet(store: &Store, req: &SnippetRequest) -> gry_core::GryRes
         "outline": outline,
         "total_lines": end.saturating_sub(start) + 1,
     });
+    if mode == "full" {
+        let returned = out["source"]
+            .as_str()
+            .map(|source| source.lines().count())
+            .unwrap_or(0);
+        let total = out["total_lines"].as_u64().unwrap_or(0) as usize;
+        out["returned_lines"] = json!(returned);
+        out["truncated"] = json!(returned < total);
+        if returned < total {
+            out["next_start_line"] = json!(start + returned);
+        }
+    }
     if req.include_neighbors {
         let edges = store.edges_for_nodes(
             &[node.id],
@@ -774,8 +802,67 @@ pub struct OutlineRequest {
 }
 
 pub fn get_file_outline(store: &Store, req: &OutlineRequest) -> gry_core::GryResult<Value> {
-    store.require_project(&req.project)?;
-    let mut nodes = store.nodes_by_file(&req.project, &req.file_path)?;
+    let project = store.require_project(&req.project)?;
+    if req.file_path.starts_with('/') {
+        return Err(gry_core::GryError::invalid(
+            "file_path must be repository-relative, not absolute",
+        ));
+    }
+    let mut normalized = req.file_path.trim();
+    if let Some(rest) = normalized.strip_prefix("./") {
+        normalized = rest;
+    }
+    if normalized.is_empty()
+        || normalized.starts_with("../")
+        || normalized.split('/').any(|part| part == "..")
+        || normalized.contains('\0')
+    {
+        return Err(gry_core::GryError::invalid(format!(
+            "invalid repository-relative file_path: {}",
+            req.file_path
+        )));
+    }
+    let hashes = store.file_hashes_for_paths(&req.project, &[normalized.to_string()])?;
+    let mut nodes = store.nodes_by_file(&req.project, normalized)?;
+    let indexed = !nodes.is_empty() || !hashes.is_empty();
+    let root = Path::new(&project.root_path);
+    let path = root.join(normalized);
+    if !indexed {
+        if path.is_dir() {
+            return Err(gry_core::GryError::invalid(format!(
+                "file_path is a directory, not a file: {normalized}"
+            )));
+        }
+        if path.is_file() {
+            return Err(gry_core::GryError::invalid(format!(
+                "file exists but is not part of the index: {normalized}. Run index_repository for this project before relying on its outline."
+            )));
+        }
+        return Err(gry_core::GryError::invalid(format!(
+            "file not found in the index or on disk: {normalized}. Use search_code/search_graph to locate indexed files."
+        )));
+    }
+    if !path.is_file() {
+        return Err(gry_core::GryError::invalid(format!(
+            "source unavailable for outlined file {normalized}: recorded in the index but missing on disk. The repository may have moved; re-index before relying on this file."
+        )));
+    }
+    if let Some(recorded) = hashes.first() {
+        let bytes = std::fs::read(&path).map_err(|error| {
+            gry_core::GryError::invalid(format!(
+                "source unavailable for outlined file {normalized}: {error}. Re-index before relying on this file."
+            ))
+        })?;
+        if gry_store::sha256_hex(&bytes) != recorded.sha256 {
+            return Err(gry_core::GryError::invalid(format!(
+                "source for {normalized} changed since it was indexed; the outline line numbers are stale. Re-index before relying on this file."
+            )));
+        }
+    } else {
+        return Err(gry_core::GryError::invalid(format!(
+            "file {normalized} has only a referenced-path placeholder in the index, not an indexed source file. Use search_code or re-index the repository."
+        )));
+    }
     nodes.retain(|n| {
         !matches!(
             n.label.as_str(),
@@ -814,6 +901,27 @@ pub fn get_file_outline(store: &Store, req: &OutlineRequest) -> gry_core::GryRes
         "has_more": req.offset + rows.len() < total,
         "rows": rows,
     }))
+}
+
+fn ensure_source_matches_index(
+    store: &Store,
+    project: &str,
+    rel_path: &str,
+    qualified_name: &str,
+    bytes: &[u8],
+) -> gry_core::GryResult<()> {
+    let hashes = store.file_hashes_for_paths(project, &[rel_path.to_string()])?;
+    let Some(recorded) = hashes.first() else {
+        return Err(gry_core::GryError::invalid(format!(
+            "source for {qualified_name} ({rel_path}) is not present in the index; re-index before relying on this symbol"
+        )));
+    };
+    if gry_store::sha256_hex(bytes) != recorded.sha256 {
+        return Err(gry_core::GryError::invalid(format!(
+            "source for {qualified_name} ({rel_path}) changed since it was indexed; the recorded line range is stale. Re-index before relying on this source."
+        )));
+    }
+    Ok(())
 }
 
 fn encode_search_cursor(generation: &str, pattern: &str, offset: usize) -> String {
@@ -908,7 +1016,40 @@ mod tests {
 
     #[test]
     fn outlines_filter_and_page() {
-        let store = test_store();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let text = "fn one() {}\nfn two() {}\n";
+        std::fs::write(root.join("src/lib.rs"), text).unwrap();
+        let metadata = std::fs::metadata(root.join("src/lib.rs")).unwrap();
+        let nodes = vec![
+            gry_core::types::NewNode::new(
+                "File",
+                "lib.rs",
+                "p.src.lib.__file__",
+                "src/lib.rs",
+                0,
+                2,
+            ),
+            gry_core::types::NewNode::new("Function", "one", "p.src.lib.one", "src/lib.rs", 1, 1),
+            gry_core::types::NewNode::new("Function", "two", "p.src.lib.two", "src/lib.rs", 2, 2),
+        ];
+        let files = vec![gry_core::types::FileHash {
+            rel_path: "src/lib.rs".into(),
+            sha256: gry_store::sha256_hex(text.as_bytes()),
+            mtime_ns: metadata
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i64,
+            size: metadata.len() as i64,
+        }];
+        let mut store = Store::open_in_memory().unwrap();
+        let mut write = gry_store::ProjectWrite::new("p", root.to_str().unwrap(), "full", "g");
+        write.nodes = &nodes;
+        write.files = &files;
+        store.publish(&write).unwrap();
         let out = get_file_outline(
             &store,
             &OutlineRequest {
@@ -922,6 +1063,232 @@ mod tests {
         .unwrap();
         assert_eq!(out["total"].as_i64().unwrap(), 2);
         assert_eq!(out["rows"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn outline_rejects_paths_that_are_not_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("indexed.rs"), "fn indexed() {}\n").unwrap();
+        std::fs::write(root.join("unindexed.rs"), "fn unindexed() {}\n").unwrap();
+        let text = std::fs::read(root.join("indexed.rs")).unwrap();
+        let metadata = std::fs::metadata(root.join("indexed.rs")).unwrap();
+        let nodes = vec![
+            gry_core::types::NewNode::new(
+                "File",
+                "indexed.rs",
+                "p.indexed.rs.__file__",
+                "indexed.rs",
+                0,
+                1,
+            ),
+            gry_core::types::NewNode::new(
+                "Function",
+                "indexed",
+                "p.indexed.indexed",
+                "indexed.rs",
+                1,
+                1,
+            ),
+        ];
+        let files = vec![gry_core::types::FileHash {
+            rel_path: "indexed.rs".into(),
+            sha256: gry_store::sha256_hex(&text),
+            mtime_ns: metadata
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i64,
+            size: metadata.len() as i64,
+        }];
+        let mut store = Store::open_in_memory().unwrap();
+        let mut write = gry_store::ProjectWrite::new("p", root.to_str().unwrap(), "full", "g");
+        write.nodes = &nodes;
+        write.files = &files;
+        store.publish(&write).unwrap();
+
+        let missing = get_file_outline(
+            &store,
+            &OutlineRequest {
+                project: "p".into(),
+                file_path: "absent.rs".into(),
+                labels: vec![],
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .unwrap_err();
+        assert!(missing.to_string().contains("not found"), "{missing}");
+
+        let unindexed = get_file_outline(
+            &store,
+            &OutlineRequest {
+                project: "p".into(),
+                file_path: "unindexed.rs".into(),
+                labels: vec![],
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            unindexed.to_string().contains("not part of the index"),
+            "{unindexed}"
+        );
+
+        let traversal = get_file_outline(
+            &store,
+            &OutlineRequest {
+                project: "p".into(),
+                file_path: "../outside.rs".into(),
+                labels: vec![],
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            traversal
+                .to_string()
+                .contains("invalid repository-relative"),
+            "{traversal}"
+        );
+    }
+
+    #[test]
+    fn snippet_auto_bounds_a_large_function_with_continuation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut text = String::from("func big() {\n");
+        for i in 0..200 {
+            text.push_str(&format!("\t_ = {i}\n"));
+        }
+        text.push_str("}\n");
+        std::fs::write(root.join("big.go"), &text).unwrap();
+        let metadata = std::fs::metadata(root.join("big.go")).unwrap();
+        let nodes = vec![
+            gry_core::types::NewNode::new("File", "big.go", "p.big.go.__file__", "big.go", 0, 202),
+            gry_core::types::NewNode::new("Function", "big", "p.big.big", "big.go", 1, 202),
+        ];
+        let files = vec![gry_core::types::FileHash {
+            rel_path: "big.go".into(),
+            sha256: gry_store::sha256_hex(text.as_bytes()),
+            mtime_ns: metadata
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i64,
+            size: metadata.len() as i64,
+        }];
+        let mut store = Store::open_in_memory().unwrap();
+        let mut write = gry_store::ProjectWrite::new("p", root.to_str().unwrap(), "full", "g");
+        write.nodes = &nodes;
+        write.files = &files;
+        store.publish(&write).unwrap();
+        let out = get_code_snippet(
+            &store,
+            &SnippetRequest {
+                project: "p".into(),
+                qualified_name: "p.big.big".into(),
+                include_neighbors: false,
+                source_mode: "auto".into(),
+                member_limit: 10,
+                member_offset: 0,
+                start_line: None,
+                max_lines: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(out["returned_lines"], 120);
+        assert_eq!(out["truncated"], true);
+        assert_eq!(out["next_start_line"], 121);
+        assert_eq!(out["source"].as_str().unwrap().lines().count(), 120);
+    }
+
+    #[test]
+    fn snippet_and_outline_reject_a_changed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let text = "fn target() {\n    1\n}\n";
+        std::fs::write(root.join("src/lib.rs"), text).unwrap();
+        let metadata = std::fs::metadata(root.join("src/lib.rs")).unwrap();
+        let nodes = vec![
+            gry_core::types::NewNode::new(
+                "File",
+                "lib.rs",
+                "p.src.lib.__file__",
+                "src/lib.rs",
+                0,
+                3,
+            ),
+            gry_core::types::NewNode::new(
+                "Function",
+                "target",
+                "p.src.lib.target",
+                "src/lib.rs",
+                1,
+                3,
+            ),
+        ];
+        let files = vec![gry_core::types::FileHash {
+            rel_path: "src/lib.rs".into(),
+            sha256: gry_store::sha256_hex(text.as_bytes()),
+            mtime_ns: metadata
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i64,
+            size: metadata.len() as i64,
+        }];
+        let mut store = Store::open_in_memory().unwrap();
+        let mut write = gry_store::ProjectWrite::new("p", root.to_str().unwrap(), "full", "g");
+        write.nodes = &nodes;
+        write.files = &files;
+        store.publish(&write).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "// shifted\n\nfn target() {\n    1\n}\n",
+        )
+        .unwrap();
+
+        let snippet = get_code_snippet(
+            &store,
+            &SnippetRequest {
+                project: "p".into(),
+                qualified_name: "p.src.lib.target".into(),
+                include_neighbors: false,
+                source_mode: "full".into(),
+                member_limit: 10,
+                member_offset: 0,
+                start_line: None,
+                max_lines: None,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            snippet.to_string().contains("changed since it was indexed"),
+            "{snippet}"
+        );
+
+        let outline = get_file_outline(
+            &store,
+            &OutlineRequest {
+                project: "p".into(),
+                file_path: "src/lib.rs".into(),
+                labels: vec![],
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            outline.to_string().contains("changed since it was indexed"),
+            "{outline}"
+        );
     }
 
     #[test]

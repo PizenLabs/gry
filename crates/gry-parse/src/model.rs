@@ -79,6 +79,11 @@ pub struct Def {
     pub params: Vec<String>,
     #[serde(default)]
     pub return_type: Option<String>,
+    /// Declared type for a field/property (Go `catalogSrv catalogService`).
+    /// Kept separately from callable return types so the indexer can resolve
+    /// calls on a struct field declared in another file.
+    #[serde(default)]
+    pub type_name: Option<String>,
     /// `(name, is_implements)` pairs.
     #[serde(default)]
     pub bases: Vec<(String, bool)>,
@@ -123,6 +128,11 @@ pub struct CallSite {
     pub receiver: Option<String>,
     #[serde(default)]
     pub receiver_type: Option<String>,
+    /// Declared type of the first segment of a dotted receiver expression
+    /// (`e` in `e.store.Add`). The field type itself may live in another file,
+    /// so the cross-file resolution happens in the indexer.
+    #[serde(default)]
+    pub receiver_base_type: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]

@@ -148,6 +148,12 @@ pub fn build(parsed: &[ParsedFile], options: &BuildOptions) -> BuildResult {
                     Value::String(return_type.clone()),
                 );
             }
+            if let Some(type_name) = &def.type_name {
+                props.insert(
+                    "declared_type".to_string(),
+                    Value::String(type_name.clone()),
+                );
+            }
             if let Some(signature) = &def.signature {
                 props.insert("signature".to_string(), Value::String(signature.clone()));
             }
@@ -552,10 +558,62 @@ pub fn build(parsed: &[ParsedFile], options: &BuildOptions) -> BuildResult {
         .filter(|s| s.is_test)
         .map(|s| s.qn.as_str())
         .collect();
+    // Declared field types are often in a different file than the method that
+    // uses them (`httpHandler.catalogSrv` lives in http.go while the call is in
+    // http_admin_products.go). The extractor's per-file type map cannot see
+    // that, so build a project-wide (type, field) -> type map for receiver
+    // inference. Without it, interface calls from handlers stay unresolved or
+    // bind to an unrelated same-module method.
+    let mut field_types: HashMap<(String, String), String> = HashMap::new();
+    for file in parsed {
+        for def in &file.extract.defs {
+            if def.label != labels::FIELD {
+                continue;
+            }
+            let (Some(class), Some(declared)) = (def.scope.last(), def.type_name.as_deref()) else {
+                continue;
+            };
+            field_types
+                .entry((class.clone(), def.name.clone()))
+                .or_insert_with(|| declared.to_string());
+        }
+    }
     for file in parsed {
         let rel = &file.discovered.rel_path;
         let module_qn = qn_module(&options.project, rel, file.discovered.module_is_dir);
         for call in &file.extract.calls {
+            let mut call = call.clone();
+            if call.receiver_type.is_none() {
+                if let (Some(receiver), Some(class)) = (
+                    call.receiver.as_deref(),
+                    call.scope
+                        .len()
+                        .checked_sub(2)
+                        .and_then(|index| call.scope.get(index)),
+                ) {
+                    let field = receiver
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(receiver)
+                        .trim()
+                        .trim_end_matches("()");
+                    if let Some(declared) = field_types.get(&(class.clone(), field.to_string())) {
+                        call.receiver_type = Some(declared.clone());
+                    }
+                }
+            }
+            // The base variable often has a statically known type (`e
+            // English`) while the field it reaches (`e.store`) is declared in
+            // another file. Walk the project-wide field map from that base type
+            // to infer the final receiver type.
+            if call.receiver_type.is_none() {
+                if let (Some(receiver), Some(base)) =
+                    (call.receiver.as_deref(), call.receiver_base_type.as_deref())
+                {
+                    call.receiver_type = resolve_field_chain(base, receiver, &field_types);
+                }
+            }
+            let call = &call;
             let caller = scope_qn(
                 &options.project,
                 rel,
@@ -805,7 +863,11 @@ pub fn build(parsed: &[ParsedFile], options: &BuildOptions) -> BuildResult {
         if !handler.is_empty() {
             target = symbols
                 .iter()
-                .find(|s| s.file_path == rel && s.name == handler)
+                .find(|s| {
+                    s.file_path == rel
+                        && s.name == handler
+                        && matches!(s.label.as_str(), labels::FUNCTION | labels::METHOD)
+                })
                 .map(|s| s.qn.clone());
         }
         // A route registered from another file names its handler through a
@@ -817,6 +879,7 @@ pub fn build(parsed: &[ParsedFile], options: &BuildOptions) -> BuildResult {
                     .iter()
                     .filter(|s| {
                         s.name == handler
+                            && matches!(s.label.as_str(), labels::FUNCTION | labels::METHOD)
                             && s.scope.last().map(String::as_str) == Some(handler_type)
                     })
                     .map(|s| s.qn.clone());
@@ -1206,6 +1269,28 @@ fn add_diagrams(
             }
         }
     }
+}
+
+/// Resolve the type of a dotted receiver expression (`e.store`) starting from
+/// the statically known type of its base variable (`English`). Returns `None`
+/// as soon as a field is not declared with an explicit type, so unresolved
+/// chains stay unresolved instead of guessing.
+fn resolve_field_chain(
+    base_type: &str,
+    receiver: &str,
+    field_types: &HashMap<(String, String), String>,
+) -> Option<String> {
+    let mut segments = receiver.split('.').skip(1).peekable();
+    segments.peek()?;
+    let mut current = base_type.to_string();
+    for segment in segments {
+        let field = segment.trim().trim_end_matches("()");
+        if field.is_empty() {
+            return None;
+        }
+        current = field_types.get(&(current, field.to_string()))?.clone();
+    }
+    Some(current)
 }
 
 fn scope_qn(

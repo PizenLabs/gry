@@ -1234,6 +1234,15 @@ fn resolve_target(
     else {
         return Ok(unresolved_target(input, "not_found"));
     };
+    // BM25 can match a single shared token through a docstring or body
+    // (`NopeSymbolXyz` hits "symbol" in an unrelated Money.Display). An
+    // explicit target is a symbol/file identifier, not a natural-language
+    // question; require every identifier token to be present in the node's
+    // identity before accepting a fuzzy hit. Task-only searches keep the
+    // broader relevance behavior.
+    if !from_task && !target_tokens_match(&hit.node, trimmed) {
+        return Ok(unresolved_target(input, "not_found"));
+    }
     Ok(ResolvedTarget {
         input: input.to_string(),
         method: if from_task { "task_search" } else { "search" }.to_string(),
@@ -1288,6 +1297,23 @@ fn unresolved_target(input: &str, reason: &str) -> ResolvedTarget {
         file: None,
         reason: Some(reason.to_string()),
     }
+}
+
+/// True when every identifier token in `input` appears in the node's identity
+/// (name, qualified name, file path or docstring). Used to reject weak BM25
+/// hits for explicit targets.
+fn target_tokens_match(node: &Node, input: &str) -> bool {
+    let tokens = split_identifier(input);
+    if tokens.is_empty() {
+        return false;
+    }
+    let docstring = node.property_str("docstring").unwrap_or("");
+    let haystack = format!(
+        "{} {} {} {}",
+        node.name, node.qualified_name, node.file_path, docstring
+    )
+    .to_ascii_lowercase();
+    tokens.iter().all(|token| haystack.contains(token))
 }
 
 fn is_container_label(label: &str) -> bool {
@@ -3401,6 +3427,24 @@ mod tests {
         assert!(text.len() <= 128 * 4, "len={} text={text}", text.len());
         assert_eq!(out["budget"]["truncated"], true);
         assert!(!out["budget"]["omitted"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn explicit_target_rejects_a_partial_token_match() {
+        let node = Node {
+            id: 1,
+            project: "p".into(),
+            label: "Method".into(),
+            name: "Display".into(),
+            qualified_name: "p.money.Money.Display".into(),
+            file_path: "money.go".into(),
+            start_line: 1,
+            end_line: 2,
+            properties: json!({"docstring": "Format the currency symbol for display."}),
+        };
+        assert!(target_tokens_match(&node, "Display"));
+        assert!(target_tokens_match(&node, "symbol"));
+        assert!(!target_tokens_match(&node, "NopeSymbolXyz"));
     }
 
     #[test]

@@ -113,14 +113,15 @@ fn update_page(map: &mut serde_json::Map<String, Value>, returned: usize) {
     let offset = map.get("offset").and_then(Value::as_u64).unwrap_or(0);
     let has_more = offset + (returned as u64) < total;
     map.insert("has_more".into(), Value::Bool(has_more));
-    map.insert(
-        "next_offset".into(),
-        if has_more {
-            Value::Number((offset + (returned as u64)).into())
-        } else {
-            Value::Null
-        },
-    );
+    let next = if has_more {
+        Value::Number((offset + (returned as u64)).into())
+    } else {
+        Value::Null
+    };
+    map.insert("next_offset".into(), next.clone());
+    if map.contains_key("members") {
+        map.insert("next_member_offset".into(), next);
+    }
 }
 
 fn shrink(value: &mut Value, limit: usize, compact: bool) {
@@ -144,6 +145,18 @@ fn shrink(value: &mut Value, limit: usize, compact: bool) {
     let paths: &[&[&str]] = &[
         &["semantic", "rows"],
         &["coverage_rows"],
+        &["outline", "members"],
+        &["nodes_added", "rows"],
+        &["nodes_removed", "rows"],
+        &["edges_added", "rows"],
+        &["edges_removed", "rows"],
+        // Bounded task context keeps the evidence that was selected, even if
+        // the page has to shrink; collapsing `nodes` to a count makes the
+        // whole answer unusable.
+        &["nodes"],
+        &["relationships"],
+        &["files"],
+        &["targets"],
         &["seeds", "rows"],
         &["modules", "rows"],
         &["impact", "rows"],
@@ -253,6 +266,62 @@ mod tests {
         let value = json!({"results": (0..50).map(|i| json!({"qn": format!("a{i}"), "name": "x"})).collect::<Vec<_>>()});
         let text = render(&value, "tree", 128);
         assert!(serde_json::from_str::<Value>(&text).is_ok());
+    }
+
+    #[test]
+    fn nested_outline_members_are_truncated_instead_of_dropped() {
+        let members: Vec<Value> = (0..60)
+            .map(|i| json!({"qn": format!("p.src.lib.Interface.Method{i}"), "name": format!("Method{i}"), "label": "Method", "lines": [i, i]}))
+            .collect();
+        let value = json!({
+            "qn": "p.src.lib.Interface",
+            "label": "Interface",
+            "outline": {"total": 60, "offset": 0, "limit": 50, "has_more": true, "members": members},
+        });
+        let text = render(&value, "json", 128);
+        assert!(text.len() <= 128 * 4);
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        let outline = &parsed["outline"];
+        assert_eq!(outline["truncated"], true);
+        assert!(outline["members"].as_array().unwrap().len() < 60);
+        assert_eq!(outline["has_more"], true);
+        assert_eq!(outline["next_member_offset"], outline["next_offset"]);
+        assert!(outline["next_member_offset"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn nested_compare_rows_are_truncated_instead_of_dropped() {
+        let rows: Vec<Value> = (0..100)
+            .map(|i| json!({"qn": format!("p.node{i}"), "name": format!("node{i}"), "label": "Function", "file": "src/lib.rs", "lines": [i, i]}))
+            .collect();
+        let value = json!({
+            "nodes_added": {"total": 100, "returned": 100, "truncated": false, "rows": rows},
+            "nodes_removed": {"total": 0, "returned": 0, "truncated": false, "rows": []},
+        });
+        let text = render(&value, "json", 128);
+        assert!(text.len() <= 128 * 4);
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert!(parsed["nodes_added"]["rows"].as_array().unwrap().len() < 100);
+    }
+
+    #[test]
+    fn context_nodes_shrink_instead_of_collapsing_to_a_count() {
+        let nodes: Vec<Value> = (0..60)
+            .map(|i| json!({"qn": format!("p.src.lib.Function{i}"), "name": format!("Function{i}"), "label": "Function", "role": "caller", "distance": 1, "file": "src/lib.rs", "lines": [i, i], "provenance": "verified"}))
+            .collect();
+        let value = json!({
+            "project": "p",
+            "targets": [{"input": "Function", "status": "resolved"}],
+            "files": [{"path": "src/lib.rs", "nodes": 60}],
+            "nodes": nodes,
+            "relationships": [],
+            "truncated": false,
+        });
+        let text = render(&value, "json", 128);
+        assert!(text.len() <= 128 * 4);
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert!(parsed["nodes"].as_array().is_some(), "{text}");
+        assert!(parsed["nodes"].as_array().unwrap().len() < 60);
     }
 
     #[test]

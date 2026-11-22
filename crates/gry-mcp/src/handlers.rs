@@ -3,7 +3,7 @@
 use crate::tools::ToolProfile;
 use gry_core::config::Config;
 use gry_index::jobs::JobManager;
-use gry_index::pipeline::{IndexRequest, Indexer};
+use gry_index::pipeline::{read_job_status, IndexRequest, Indexer};
 use gry_query::adr::{manage_adr, AdrRequest};
 use gry_query::architecture::{get_architecture, ArchitectureRequest};
 use gry_query::compare::compare_graphs;
@@ -39,14 +39,56 @@ impl<'a> Ctx<'a> {
         let store = self.store()?;
         if let Some(project) = args.get("project").and_then(Value::as_str) {
             if !project.is_empty() {
-                if store.project(project)?.is_none() {
+                if store.project(project)?.is_some() {
+                    return Ok(project.to_string());
+                }
+                // Accept an indexed root (or any descendant directory) as an
+                // explicit project value. Agents frequently know the workspace
+                // path but not the project name; rejecting the path while the
+                // name works produces a needless round trip.
+                if let Ok(Some(record)) = store.project_by_root(project) {
+                    return Ok(record.name);
+                }
+                let path = std::path::Path::new(project);
+                let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+                if canonical != path {
+                    if let Ok(Some(record)) = store.project_by_root(&canonical.to_string_lossy()) {
+                        return Ok(record.name);
+                    }
+                }
+                let containing = store.projects_containing_path(path)?;
+                if let Some(first) = containing.first() {
+                    let depth = std::path::Path::new(&first.root_path).components().count();
+                    let tied: Vec<_> = containing
+                        .iter()
+                        .filter(|candidate| {
+                            std::path::Path::new(&candidate.root_path)
+                                .components()
+                                .count()
+                                == depth
+                        })
+                        .collect();
+                    if tied.len() == 1 {
+                        return Ok(first.name.clone());
+                    }
+                    let names = tied
+                        .iter()
+                        .map(|candidate| candidate.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     return Err(project_resolution_error(
                         &store,
-                        &format!("project not found or not indexed: {project}"),
-                        None,
+                        &format!(
+                            "project path {project} matches multiple indexed projects: {names}; pass project=<name>"
+                        ),
+                        Some(path),
                     ));
                 }
-                return Ok(project.to_string());
+                return Err(project_resolution_error(
+                    &store,
+                    &format!("project not found or not indexed: {project}"),
+                    None,
+                ));
             }
         }
         // A remembered project is only reused while it still exists. A project
@@ -262,6 +304,24 @@ fn index_repository(
         };
         if let Some(status) = ctx.jobs.status(&project) {
             return Ok((serde_json::to_value(status)?, format(args), 0));
+        }
+        // The job manager is in-process. After an MCP restart (or when another
+        // gry process owns the job) the persisted status is the only evidence.
+        // Never replace a queued/running job with a synthetic "succeeded" from
+        // the previous project generation: that would report stale data as a
+        // completed index.
+        if let Some(mut persisted) = read_job_status(ctx.config, &project) {
+            if persisted
+                .get("state")
+                .and_then(Value::as_str)
+                .is_some_and(|state| matches!(state, "queued" | "running" | "cancelling"))
+            {
+                persisted["stale_status"] = Value::Bool(true);
+                persisted["note"] = Value::String(
+                    "This job status was written by another gry process or before a restart. If that process is gone, re-run index_repository; the current graph still reflects the previous generation.".to_string(),
+                );
+            }
+            return Ok((persisted, format(args), 0));
         }
         let store = ctx.store()?;
         let record = store
@@ -543,7 +603,7 @@ fn schema_tool(
         u(args, "limit", 50).clamp(1, 500),
         u(args, "offset", 0),
     )?;
-    Ok((value, format(args), 0))
+    Ok((value, format(args), max_tokens(args, 3200)))
 }
 
 fn compare_tool(
@@ -558,7 +618,7 @@ fn compare_tool(
         u(args, "limit", 200).clamp(1, 1000),
         u(args, "scan_limit", 2_000_000).clamp(1, 10_000_000),
     )?;
-    Ok((value, format(args), 0))
+    Ok((value, format(args), max_tokens(args, 3200)))
 }
 
 fn architecture_tool(

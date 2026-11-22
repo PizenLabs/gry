@@ -56,6 +56,17 @@ pub fn check_index_coverage(
             (Some(_), None) => true,
             (None, _) => false,
         };
+        // Explicit path checks are bounded (the caller supplies the list), so
+        // verify the content even when size/mtime still match. A same-size edit
+        // with a preserved timestamp would otherwise be reported as fresh.
+        let stale = stale
+            || match (hash, &metadata) {
+                (Some(hash), Some(_)) => match std::fs::read(&file_path) {
+                    Ok(bytes) => gry_store::sha256_hex(&bytes) != hash.sha256,
+                    Err(_) => true,
+                },
+                _ => false,
+            };
         let (status, reason): (&str, &str) = match (hash, coverage_map.get(normalized)) {
             (_, Some(kind)) if *kind == "parse_partial" => ("partial", "parse_partial"),
             (_, Some(kind)) if *kind == "parse_unusable" => ("partial", "parse_unusable"),
@@ -242,6 +253,7 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/lib.rs"), "fn parse() {}\n").unwrap();
         let metadata = std::fs::metadata(root.join("src/lib.rs")).unwrap();
+        let content = std::fs::read(root.join("src/lib.rs")).unwrap();
         let mtime_ns = metadata
             .modified()
             .unwrap()
@@ -250,7 +262,7 @@ mod tests {
             .as_nanos() as i64;
         let files = vec![gry_core::types::FileHash {
             rel_path: "src/lib.rs".to_string(),
-            sha256: "a".to_string(),
+            sha256: gry_store::sha256_hex(&content),
             mtime_ns,
             size: metadata.len() as i64,
         }];
@@ -318,6 +330,51 @@ mod tests {
         assert_eq!(status["source_available"], false);
         assert_eq!(status["availability"], "root_missing");
         assert!(status["warning"].is_string());
+    }
+
+    #[test]
+    fn coverage_hashes_content_even_when_stat_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("lib.rs"), "fn parse() {}\n").unwrap();
+        let metadata = std::fs::metadata(root.join("lib.rs")).unwrap();
+        let mtime = metadata.modified().unwrap();
+        let content = std::fs::read(root.join("lib.rs")).unwrap();
+        let files = vec![gry_core::types::FileHash {
+            rel_path: "lib.rs".to_string(),
+            sha256: gry_store::sha256_hex(&content),
+            mtime_ns: mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i64,
+            size: metadata.len() as i64,
+        }];
+        let mut store = Store::open_in_memory().unwrap();
+        let mut write = gry_store::ProjectWrite::new("p", root.to_str().unwrap(), "full", "gen-1");
+        write.files = &files;
+        store.publish(&write).unwrap();
+
+        std::fs::write(root.join("lib.rs"), "fn parsX() {}\n").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("lib.rs"))
+            .unwrap();
+        file.set_modified(mtime).unwrap();
+        let out = check_index_coverage(
+            &store,
+            "p",
+            &["lib.rs".to_string()],
+            &[],
+            20,
+            0,
+            20,
+            0,
+            "none",
+        )
+        .unwrap();
+        assert_eq!(out["paths"][0]["status"], "stale");
+        assert_eq!(out["paths"][0]["reason"], "file_changed_since_index");
+        assert_eq!(out["paths"][0]["fresh"], false);
     }
 
     #[test]

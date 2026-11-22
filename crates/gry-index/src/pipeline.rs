@@ -37,7 +37,7 @@ macro_rules! phase {
 // Bump whenever extraction or resolution semantics change in a way that
 // existing graphs cannot represent. A mismatch forces a clean rebuild instead
 // of a delta that would preserve stale edges.
-pub const EXTRACTOR_VERSION: &str = "36";
+pub const EXTRACTOR_VERSION: &str = "37";
 
 /// Extraction semantics are cached per project. A global marker would let a
 /// project indexed by an older extractor take the delta path after a different
